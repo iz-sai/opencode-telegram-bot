@@ -1,6 +1,8 @@
 import type { I18nDictionary } from "./en.js";
 
 export const de: I18nDictionary = {
+  "cmd.description.switch": "Sitzung suchen und wechseln (OpenCode / ChatGPT / Claude)",
+  "cmd.description.messages_all": "Vollständigen Sitzungsverlauf anzeigen",
   "cmd.description.recent": "Letzte Sitzungen aller Projekte",
   "recent.heading": "Letzte Sitzungen aller Projekte (mit /recent aktualisieren):",
   "recent.empty": "📭 Keine Sitzungen in den Projekten gefunden.",

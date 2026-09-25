@@ -35,6 +35,7 @@ describe("bot/routers/command-router", () => {
     expect(bot.command.mock.calls.map(([command]) => command)).toEqual([
       "start",
       "help",
+      "switch",
       "status",
       "settings",
       "opencode_start",
@@ -46,6 +47,7 @@ describe("bot/routers/command-router", () => {
       "sessions",
       "recent",
       "messages",
+      "messages_all",
       "new",
       "abort",
       "detach",

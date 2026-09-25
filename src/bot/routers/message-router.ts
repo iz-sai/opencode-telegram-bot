@@ -31,6 +31,8 @@ import { handleVoiceMessage } from "../handlers/voice-handler.js";
 import { unknownCommandMiddleware } from "../middleware/unknown-command.js";
 import { getIncomingPrompt } from "../handlers/rich-message-handler.js";
 import { handleUnsupportedMessage } from "../handlers/unsupported-message-handler.js";
+import { isSwitchWaiting, clearSwitchWaiting } from "../services/switch-manager.js";
+import { handleSwitchQuery } from "../commands/switch-command.js";
 
 interface MessageRouterDeps {
   container: AppContainer;
@@ -217,6 +219,13 @@ export function registerMessageRouter(bot: Bot<Context>, deps: MessageRouterDeps
 
     const handledCatalogTextArgs = await handleCatalogTextArguments(ctx, botDeps);
     if (handledCatalogTextArgs) {
+      return;
+    }
+
+    if (ctx.chat && isSwitchWaiting(ctx.chat.id)) {
+      clearSwitchWaiting(ctx.chat.id);
+      logger.info(`[Bot] Intercepted text query for session switch: "${text}"`);
+      await handleSwitchQuery(ctx, botDeps, text);
       return;
     }
 

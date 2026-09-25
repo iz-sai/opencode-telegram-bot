@@ -8,6 +8,8 @@ import type { I18nDictionary } from "./en.js";
  * Keep this dictionary complete to avoid falling back to another locale.
  */
 export const ar: I18nDictionary = {
+  "cmd.description.switch": "البحث وتبديل الجلسة (OpenCode / ChatGPT / Claude)",
+  "cmd.description.messages_all": "تصدير وعرض سجل الجلسة الكامل",
   "cmd.description.recent": "الجلسات الأخيرة عبر المشاريع",
   "recent.heading": "الجلسات الأخيرة عبر المشاريع (للتحديث: /recent):",
   "recent.empty": "📭 لا توجد جلسات في المشاريع.",

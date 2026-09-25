@@ -1,6 +1,7 @@
 import type { Bot, Context, NextFunction } from "grammy";
 import type { AppContainer } from "../../app/bootstrap/app-container.js";
 import { config } from "../../config.js";
+import { switchCommand } from "../commands/switch-command.js";
 import { settingsCommand } from "../commands/settings-command.js";
 import { opencodeStartCommand } from "../commands/opencode-start-command.js";
 import { opencodeStopCommand } from "../commands/opencode-stop-command.js";
@@ -11,6 +12,7 @@ import { lsCommand } from "../commands/ls-command.js";
 import { sessionsCommand } from "../commands/sessions-command.js";
 import { recentCommand } from "../commands/recent-command.js";
 import { messagesCommand } from "../commands/messages-command.js";
+import { messagesAllCommand } from "../commands/messages-all-command.js";
 import { newCommand } from "../commands/new-command.js";
 import { abortCommand } from "../commands/abort-command.js";
 import { detachCommand } from "../commands/detach-command.js";
@@ -85,6 +87,7 @@ export function registerCommandRouter(bot: Bot<Context>, deps: CommandRouterDeps
 
   bot.command("start", (ctx) => startCommand(ctx, container));
   bot.command("help", helpCommand);
+  bot.command("switch", (ctx) => switchCommand(ctx, botDeps));
   bot.command("status", (ctx) => statusCommand(ctx, container));
   bot.command("settings", (ctx) => settingsCommand(ctx, container));
   bot.command("opencode_start", (ctx) => opencodeStartCommand(ctx, container));
@@ -96,6 +99,7 @@ export function registerCommandRouter(bot: Bot<Context>, deps: CommandRouterDeps
   bot.command("sessions", (ctx) => sessionsCommand(ctx, container));
   bot.command("recent", (ctx) => recentCommand(ctx, container));
   bot.command("messages", (ctx) => messagesCommand(ctx, container));
+  bot.command("messages_all", (ctx) => messagesAllCommand(ctx, container));
   bot.command("new", (ctx) => newCommand(ctx, botDeps));
   bot.command("abort", (ctx) => abortCommand(ctx, container));
   bot.command("detach", (ctx) => detachCommand(ctx, container));

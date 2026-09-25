@@ -23,6 +23,7 @@ import { handleQuestionCallback } from "./question-callback-handler.js";
 import { handleRecentSelect } from "./recent-callback-handler.js";
 import { handleRenameCancel } from "./rename-callback-handler.js";
 import { handleSettingsCallback } from "./settings-callback-handler.js";
+import { handleSwitchCallback } from "./switch-callback.js";
 import {
   handleBackgroundSessionOpen,
   handleSessionSelect,
@@ -199,6 +200,14 @@ export function registerCallbackRouter(bot: Bot<Context>, deps: CallbackRouterDe
       {
         name: "skills",
         handlers: [(ctx) => handleSkillsCallback(ctx, botDeps)],
+        errorScope: "interaction",
+      },
+    ],
+    [
+      "switch",
+      {
+        name: "switch",
+        handlers: [(ctx) => handleSwitchCallback(ctx, botDeps)],
         errorScope: "interaction",
       },
     ],

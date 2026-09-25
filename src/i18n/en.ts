@@ -1,4 +1,6 @@
 export const en = {
+  "cmd.description.switch": "Search & switch session (OpenCode / ChatGPT / Claude)",
+  "cmd.description.messages_all": "Export & view complete unclipped session history",
   "cmd.description.recent": "Recent sessions across projects",
   "recent.heading": "Recent sessions across projects (run /recent to refresh):",
   "recent.empty": "📭 No sessions found across projects.",

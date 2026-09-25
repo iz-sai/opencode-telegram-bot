@@ -8,6 +8,8 @@ import type { I18nDictionary } from "./en.js";
  * Keep this dictionary complete to avoid falling back to another locale.
  */
 export const id: I18nDictionary = {
+  "cmd.description.switch": "Cari dan beralih sesi (OpenCode / ChatGPT / Claude)",
+  "cmd.description.messages_all": "Ekspor dan lihat riwayat lengkap sesi",
   "cmd.description.recent": "Sesi terbaru di semua proyek",
   "recent.heading": "Sesi terbaru di semua proyek (segarkan dengan /recent):",
   "recent.empty": "📭 Tidak ada sesi di semua proyek.",

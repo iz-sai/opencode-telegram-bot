@@ -1,6 +1,8 @@
 import type { I18nDictionary } from "./en.js";
 
 export const tr: I18nDictionary = {
+  "cmd.description.switch": "Oturum ara ve değiştir (OpenCode / ChatGPT / Claude)",
+  "cmd.description.messages_all": "Tam oturum geçmişini dışa aktar ve görüntüle",
   "cmd.description.recent": "Projelerdeki son oturumlar",
   "recent.heading": "Projelerdeki son oturumlar (/recent ile yenile):",
   "recent.empty": "📭 Projelerde oturum bulunamadı.",

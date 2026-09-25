@@ -1,6 +1,8 @@
 import type { I18nDictionary } from "./en.js";
 
 export const zh: I18nDictionary = {
+  "cmd.description.switch": "搜索并切换会话 (OpenCode / ChatGPT / Claude)",
+  "cmd.description.messages_all": "导出并查看完整会话历史记录",
   "cmd.description.recent": "查看所有项目的最近会话",
   "recent.heading": "所有项目的最近会话（用 /recent 刷新）：",
   "recent.empty": "📭 所有项目中都没有会话。",

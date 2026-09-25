@@ -20,6 +20,8 @@ import { buildTelegramFileUrl } from "../../app/services/file-download-service.j
 import { buildQuotedNotification } from "../../app/services/quoted-notification.js";
 import { editBotText } from "../messages/telegram-text.js";
 import { tryEnqueuePromptIfBusy } from "./prompt-queue-dispatch.js";
+import { isSwitchWaiting, clearSwitchWaiting } from "../services/switch-manager.js";
+import { handleSwitchQuery, type SwitchDeps } from "../commands/switch-command.js";
 
 const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 30_000;
 const TELEGRAM_DOWNLOAD_MAX_REDIRECTS = 3;
@@ -223,6 +225,13 @@ export async function handleVoiceMessage(ctx: Context, deps: VoiceMessageDeps): 
     const recognizedText = result.text.trim();
     if (!recognizedText) {
       await ctx.api.editMessageText(ctx.chat!.id, statusMessage.message_id, t("stt.empty_result"));
+      return;
+    }
+
+    if (ctx.chat && isSwitchWaiting(ctx.chat.id)) {
+      clearSwitchWaiting(ctx.chat.id);
+      logger.info(`[Voice] Intercepted voice query for session switch: "${recognizedText}"`);
+      await handleSwitchQuery(ctx, deps as unknown as SwitchDeps, recognizedText, statusMessage.message_id);
       return;
     }
 
