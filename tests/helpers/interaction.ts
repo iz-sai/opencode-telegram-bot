@@ -27,10 +27,16 @@ export function startInteractionForTest(
           currentIndex: 0,
           selectedOptions: new Map(),
           customAnswers: new Map(),
+          selectedCustomAnswers: new Set(),
           customInputQuestionIndex: null,
           activeMessageId: null,
           messageIds: [],
           requestID: null,
+          sessionId: "session-test",
+          answeredFromTelegram: false,
+          dismissing: false,
+          settledWhileSending: null,
+          lastCancelFailed: false,
         },
       });
     case "permission":
@@ -41,6 +47,7 @@ export function startInteractionForTest(
           requestsByMessageId: new Map(),
           requestIdsByMessageId: new Map(),
           messageIdBySignature: new Map(),
+          sendsByMessageId: new Map(),
         },
       });
     case "rename":

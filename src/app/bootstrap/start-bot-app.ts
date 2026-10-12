@@ -9,7 +9,10 @@ import {
 import { flushSettings, loadSettings } from "../stores/settings-store.js";
 import { LocalCommandRegistry } from "../services/local-command-registry.js";
 import { BUILT_IN_COMMAND_NAMES } from "../../bot/commands/definitions.js";
-import { reconcileStoredModelSelection } from "../services/model-selection-service.js";
+import {
+  reconcileStoredModelSelection,
+  startModelCatalogWarmup,
+} from "../services/model-selection-service.js";
 import { getBotVersion } from "../../runtime/bot-version.js";
 import { getRuntimeMode } from "../../runtime/mode.js";
 import { getRuntimePaths } from "../../runtime/paths.js";
@@ -203,10 +206,13 @@ export async function startBotApp(): Promise<void> {
   process.on("uncaughtException", uncaughtExceptionHandler);
 
   await loadSettings();
+  // The server may have been started together with the bot and still be registering providers.
+  startModelCatalogWarmup();
   await reconcileStoredModelSelection();
   const container = createAppContainer();
   registerOpenCodeReadyRefreshHandler(container);
-  const { opencodeAutoRestartService, scheduledTaskRuntime } = container;
+  const { healthServer, opencodeAutoRestartService, scheduledTaskRuntime } = container;
+  await healthServer.start(config.health.port, version);
   const localCommandRegistry = await LocalCommandRegistry.load({
     directoryPath: runtimePaths.localCommandsDirPath,
     builtInCommands: BUILT_IN_COMMAND_NAMES,
@@ -237,6 +243,7 @@ export async function startBotApp(): Promise<void> {
     container.cleanupProcess(`app_shutdown_${signal.toLowerCase()}`);
     opencodeAutoRestartService.stop();
     scheduledTaskRuntime.shutdown();
+    void healthServer.stop();
 
     shutdownTimeout = setTimeout(() => {
       logger.warn(`[App] Shutdown did not finish in ${SHUTDOWN_TIMEOUT_MS}ms, forcing exit.`);
@@ -321,6 +328,7 @@ export async function startBotApp(): Promise<void> {
     container.cleanupProcess("app_shutdown_complete");
     opencodeAutoRestartService.stop();
     scheduledTaskRuntime.shutdown();
+    await healthServer.stop();
     await clearManagedServiceState().catch((error) => {
       logger.warn("[App] Failed to clear managed service state", error);
     });

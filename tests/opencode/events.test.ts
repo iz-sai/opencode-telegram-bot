@@ -378,6 +378,96 @@ describe("opencode/events", () => {
     await subscription;
   });
 
+  it("runs the reconnect callback once the stream delivers again after it dropped", async () => {
+    const event = { type: "server.connected", properties: {} };
+    subscribeMock
+      .mockResolvedValueOnce({ stream: createStream([event]) })
+      .mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
+        return { stream: createOpenStream([event], options.signal) };
+      });
+    const onReconnect = vi.fn();
+
+    const subscription = subscribeToEvents("D:/repo", vi.fn(), onReconnect);
+
+    await vi.waitFor(
+      () => {
+        expect(onReconnect).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 3000 },
+    );
+
+    stopEventListening();
+    await subscription;
+  });
+
+  it("runs the reconnect callback when the client reconnects inside one subscription", async () => {
+    const connected = { type: "server.connected", properties: {} };
+    subscribeMock.mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
+      return { stream: createOpenStream([connected, connected], options.signal) };
+    });
+    const onReconnect = vi.fn();
+
+    const subscription = subscribeToEvents("D:/repo", vi.fn(), onReconnect);
+
+    await vi.waitFor(() => {
+      expect(onReconnect).toHaveBeenCalledTimes(1);
+    });
+    expect(subscribeMock).toHaveBeenCalledTimes(1);
+    expect(onReconnect).toHaveBeenCalledWith({ serverRestarted: null });
+
+    stopEventListening();
+    await subscription;
+  });
+
+  it("hands the connect event's restart mark to the reconnect callback", async () => {
+    subscribeMock
+      .mockResolvedValueOnce({
+        stream: createStream([{ type: "server.connected", properties: {} }]),
+      })
+      .mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
+        return {
+          stream: createOpenStream(
+            [{ type: "server.connected", properties: { restarted: true } }],
+            options.signal,
+          ),
+        };
+      });
+    const onReconnect = vi.fn();
+
+    const subscription = subscribeToEvents("D:/repo", vi.fn(), onReconnect);
+
+    await vi.waitFor(
+      () => {
+        expect(onReconnect).toHaveBeenCalledWith({ serverRestarted: true });
+      },
+      { timeout: 3000 },
+    );
+
+    stopEventListening();
+    await subscription;
+  });
+
+  it("does not run the reconnect callback on the first connection", async () => {
+    const callback = vi.fn();
+    const onReconnect = vi.fn();
+    subscribeMock.mockImplementationOnce(async (_params, options: { signal: AbortSignal }) => {
+      return {
+        stream: createOpenStream([{ type: "server.connected", properties: {} }], options.signal),
+      };
+    });
+
+    const subscription = subscribeToEvents("D:/repo", callback, onReconnect);
+
+    await vi.waitFor(() => {
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+    await flushImmediate();
+    expect(onReconnect).not.toHaveBeenCalled();
+
+    stopEventListening();
+    await subscription;
+  });
+
   it("reconnects after non-fatal stream error", async () => {
     subscribeMock
       .mockRejectedValueOnce(new Error("transient stream failure"))

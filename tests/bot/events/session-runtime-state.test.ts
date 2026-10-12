@@ -116,6 +116,66 @@ describe("bot/events/session-runtime-state", () => {
     expect(runtime.takeCompletedToolDuration("session-2", "call-0")).toBe(1500);
   });
 
+  describe("background operations", () => {
+    function addBackground(sessionId: string): void {
+      runtime.runningToolTracker.track(sessionId, "call-bg", true);
+      runtime.setRunningToolInfo({ ...toolInfo(sessionId), callId: "call-bg" });
+      runtime.setSubagentSnapshot(sessionId, [
+        { cardId: "card-bg", background: true, status: "running" },
+        { cardId: "card-fg", status: "running" },
+      ] as never);
+    }
+
+    it("keeps them through a turn boundary and drops the rest of the turn", () => {
+      addBackground("session-1");
+
+      runtime.clearToolTracking("session-1", "test", true);
+
+      expect(runtime.runningToolTracker.backgroundCallIds("session-1")).toEqual(["call-bg"]);
+      expect(runtime.getRunningToolInfo("session-1", "call-bg")).toBeDefined();
+      expect(runtime.getRunningToolInfo("session-1", "call-1")).toBeUndefined();
+      expect(runtime.getSubagentSnapshot("session-1")?.map((card) => card.cardId)).toEqual([
+        "card-bg",
+      ]);
+    });
+
+    it("drops them on any other clear", () => {
+      addBackground("session-1");
+
+      runtime.clearToolTracking("session-1", "test");
+
+      expect(runtime.runningToolTracker.backgroundCallIds("session-1")).toEqual([]);
+      expect(runtime.getRunningToolInfo("session-1", "call-bg")).toBeUndefined();
+      expect(runtime.getSubagentSnapshot("session-1")).toBeUndefined();
+    });
+
+    it("stops them in one session and leaves the other session running", () => {
+      addBackground("session-1");
+      runtime.runningToolTracker.track("session-2", "call-bg-2", true);
+
+      runtime.stopBackgroundOperations("test", "session-1");
+
+      expect(runtime.runningToolTracker.backgroundCallIds()).toEqual(["call-bg-2"]);
+      expect(runtime.getRunningToolInfo("session-1", "call-bg")).toBeUndefined();
+      expect(runtime.getSubagentSnapshot("session-1")?.map((card) => card.cardId)).toEqual([
+        "card-fg",
+      ]);
+    });
+
+    it("stops only the background commands and keeps following the subagent cards", () => {
+      addBackground("session-1");
+
+      runtime.stopBackgroundCommands("test", "session-1");
+
+      expect(runtime.runningToolTracker.backgroundCallIds("session-1")).toEqual([]);
+      expect(runtime.getRunningToolInfo("session-1", "call-bg")).toBeUndefined();
+      expect(runtime.getSubagentSnapshot("session-1")?.map((card) => card.cardId)).toEqual([
+        "card-bg",
+        "card-fg",
+      ]);
+    });
+  });
+
   it("keeps a session's entries apart from a same-named call in another session", () => {
     runtime.deleteRunningToolInfo("session-1", "call-1");
 
@@ -244,5 +304,60 @@ describe("bot/events/session-runtime-state text sent early", () => {
     expect(runtime.stripDeliveredAssistantText("session-1", "message-1", "Analysis")).toBe(
       "Analysis",
     );
+  });
+
+  describe("reply gate", () => {
+    it("lets out only the replies begun when the gate was taken, after the cut", async () => {
+      vi.useRealTimers();
+      streamingMode.value = "edit";
+      const api = {
+        sendMessage: vi.fn().mockResolvedValue({ message_id: 10 }),
+        sendRichMessage: vi
+          .fn()
+          .mockRejectedValue(Object.assign(new Error("Bad Request: rich"), { error_code: 400 })),
+        editMessageText: vi.fn().mockResolvedValue(undefined),
+        deleteMessage: vi.fn().mockResolvedValue(true),
+      };
+      const policy = {
+        getDestination: () => ({ api, chatId: 42 }),
+        isForegroundSession: () => true,
+      } as unknown as SessionTargetPolicy;
+      const runtime = new SessionRuntimeState({ policy, getReplyKeyboard: () => undefined });
+      let releaseOlderLine: () => void = () => {};
+      api.sendMessage.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseOlderLine = () => resolve({ message_id: 9 });
+          }),
+      );
+
+      runtime.toolCallStreamer.append("session-1", "older tool line");
+      runtime.enqueueAssistantResponse("session-1", "reply-1", {
+        parts: [{ blocks: [], fallbackText: "first reply", source: "plain" }],
+      });
+      runtime.markReplyBegun("session-1", "reply-1");
+      runtime.startReplyCut("session-1");
+      const gate = runtime.takeReplyGate("session-1");
+
+      runtime.enqueueAssistantResponse("session-1", "reply-2", {
+        parts: [{ blocks: [], fallbackText: "second reply", source: "plain" }],
+      });
+      runtime.markReplyBegun("session-1", "reply-2");
+      const letOut = gate?.();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+
+      releaseOlderLine();
+      await letOut;
+
+      const sentTexts = api.sendMessage.mock.calls.map((call) => String(call[1]));
+      expect(sentTexts).toEqual(["older tool line", "first reply"]);
+      runtime.clearAllOutput("test_cleanup");
+    });
+
+    it("has no gate while no reply has begun", () => {
+      const runtime = createRuntime();
+      expect(runtime.takeReplyGate("session-1")).toBeUndefined();
+    });
   });
 });

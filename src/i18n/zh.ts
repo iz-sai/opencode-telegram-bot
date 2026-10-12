@@ -26,6 +26,7 @@ export const zh: I18nDictionary = {
   "cmd.description.mcps": "MCP servers",
   "cmd.description.opencode_start": "启动 OpenCode 服务器",
   "cmd.description.opencode_stop": "停止 OpenCode 服务器",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "列出目录内容",
   "cmd.description.help": "帮助",
 
@@ -84,6 +85,10 @@ export const zh: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ 活动会话与所选项目不匹配，因此已重置。使用 /sessions 选择一个会话，或 /new 创建新会话。",
   "bot.prompt_send_error": "向 OpenCode 发送请求失败。",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 OpenCode 返回错误：{message}",
   "bot.assistant_reply_undelivered":
     "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
@@ -164,6 +169,8 @@ export const zh: I18nDictionary = {
   "settings.prompt_queue.label": "消息队列",
   "settings.value.on": "开启",
   "settings.value.off": "关闭",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ 设置已保存。",
 
   "projects.empty":
@@ -275,6 +282,10 @@ export const zh: I18nDictionary = {
   "opencode_stop.still_running": "停止请求后服务器仍在响应。",
   "opencode_stop.success": "✅ OpenCode 服务器已成功停止",
   "opencode_stop.error": "🔴 停止服务器时发生错误。\n\n请查看应用日志了解详情。",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ Agent 已切换为：{name}",
   "agent.change_error_callback": "切换 Agent 失败",
@@ -346,7 +357,6 @@ export const zh: I18nDictionary = {
   "permission.reply.once": "仅允许一次",
   "permission.reply.always": "始终允许",
   "permission.reply.reject": "已拒绝",
-  "permission.send_reply_error": "❌ 发送权限回复失败",
   "permission.blocked.expected_reply": "⚠️ 请先使用上方按钮回答权限请求。",
   "permission.blocked.command_not_allowed": "⚠️ 在你回答权限请求之前不可用此命令。",
   "permission.header": "{emoji} 权限请求：{name}\n\n",
@@ -354,6 +364,13 @@ export const zh: I18nDictionary = {
   "permission.button.allow": "✅ 允许一次",
   "permission.button.always": "🔓 始终允许",
   "permission.button.reject": "❌ 拒绝",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "Bash",
   "permission.name.edit": "编辑",
   "permission.name.write": "写入",
@@ -372,11 +389,11 @@ export const zh: I18nDictionary = {
   "question.select_one_required_callback": "请至少选择一个选项",
   "question.enter_custom_callback": "请发送你的自定义回答",
   "question.cancelled": "❌ 投票已取消",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "已收到答案，请稍候...",
   "question.completed_no_answers": "✅ 投票完成（无答案）",
-  "question.no_active_project": "❌ 没有活动项目",
-  "question.no_active_request": "❌ 没有活动请求",
-  "question.send_answers_error": "❌ 向代理发送答案失败",
   "question.multi_hint": "\n（你可以选择多个选项）",
   "question.button.submit": "✅ 完成",
   "question.button.custom": "🔤 自定义回答",
@@ -397,6 +414,7 @@ export const zh: I18nDictionary = {
   "queue.media_limit": "⚠️ 队列媒体总大小限制为 {maxSizeMb} MiB。请等待一个项目发送后重试。",
   "queue.removed": "🗑 消息已从队列中移除。",
   "queue.not_found": "该消息已不在队列中。",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "可在 /settings 中开启消息队列。",
   "keyboard.updated": "⌨️ 键盘已更新",
 
@@ -414,9 +432,12 @@ export const zh: I18nDictionary = {
   "subagent.line.status": "状态: {status}",
   "subagent.line.task": "任务: {task}",
   "subagent.line.agent": "代理: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "执行中...",
   "subagent.working_with_details": "执行中: {details}",
   "subagent.completed": "已完成",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "任务失败",
   "subagent.status.pending": "等待中",
   "subagent.status.running": "运行中",
@@ -447,6 +468,15 @@ export const zh: I18nDictionary = {
     "请输入 OpenCode 服务器用户名（可选）。\n按 Enter 使用默认值：{defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "请输入 OpenCode 服务器密码（可选）。\n按 Enter 保持为空。\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid": "请输入有效 URL（http/https），或按 Enter 使用默认值。\n",
   "runtime.wizard.start": "OpenCode Telegram Bot 设置。\n",
   "runtime.wizard.saved": "配置已保存：\n- {envPath}\n",
@@ -495,6 +525,7 @@ export const zh: I18nDictionary = {
   "task.kind.once": "一次性",
   "task.run.success": "⏰ 定时任务已完成: {description}",
   "task.run.error": "🔴 定时任务执行失败: {description}\n\n错误: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question": "定时任务请求了交互式问题，无法在无人值守时继续。",
   "task.run.error.interactive_permission": "定时任务请求了交互式权限，无法在无人值守时继续。",
 

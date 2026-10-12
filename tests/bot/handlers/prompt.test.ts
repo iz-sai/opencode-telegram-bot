@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Context } from "grammy";
 import type { FilePartInput } from "@opencode-ai/sdk/v2";
 import {
+  admitPromptToInbox,
   consumePromptResponseMode,
   processUserPrompt as processIncomingPrompt,
   type ProcessPromptDeps,
@@ -12,9 +13,11 @@ import { t } from "../../../src/i18n/index.js";
 import { logger } from "../../../src/utils/logger.js";
 import type { AppContainer } from "../../../src/app/bootstrap/app-container.js";
 import { createTestAppContainer } from "../../helpers/app-container.js";
+import { defined } from "../../helpers/defined.js";
 
 const mocked = vi.hoisted(() => ({
   resolvePendingAttachmentMock: vi.fn(),
+  getMissingFolderNoticeMock: vi.fn(),
   interactionClearMock: vi.fn(),
   editMessageReplyMarkupMock: vi.fn(),
   currentProject: { id: "project-1", worktree: "D:\\Projects\\Repo" },
@@ -90,6 +93,10 @@ vi.mock("../../../src/app/services/attach-service.js", () => ({
   detachAttachedSession: vi.fn(),
   markAttachedSessionBusy: vi.fn().mockResolvedValue(undefined),
   markAttachedSessionIdle: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../../../src/app/services/missing-folder-notice-service.js", () => ({
+  getMissingFolderNotice: mocked.getMissingFolderNoticeMock,
 }));
 
 // The resolver has its own suite; here only the wiring around it is under test.
@@ -223,6 +230,71 @@ describe("bot/handlers/prompt", () => {
     mocked.resolvePendingAttachmentMock.mockResolvedValue(null);
     mocked.editMessageReplyMarkupMock.mockReset();
     mocked.editMessageReplyMarkupMock.mockResolvedValue(undefined);
+    mocked.getMissingFolderNoticeMock.mockReset().mockResolvedValue(null);
+  });
+
+  describe("project folder gone", () => {
+    beforeEach(() => {
+      mocked.getMissingFolderNoticeMock.mockResolvedValue("folder gone notice");
+    });
+
+    it("answers with the notice and sends nothing", async () => {
+      const ctx = createContext();
+
+      const handled = await processUserPrompt(ctx, "Review README", createDeps());
+
+      expect(handled).toBe(false);
+      expect(mocked.getMissingFolderNoticeMock).toHaveBeenCalledWith("D:\\Projects\\Repo");
+      expect(ctx.reply).toHaveBeenCalledWith("folder gone notice");
+      expect(mocked.safeBackgroundTaskMock).not.toHaveBeenCalled();
+      expect(mocked.attachToSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("creates no session when none is selected", async () => {
+      mocked.currentSession = null;
+      const ctx = createContext();
+
+      await processUserPrompt(ctx, "Review README", createDeps());
+
+      expect(mocked.sessionCreateMock).not.toHaveBeenCalled();
+      expect(ctx.reply).not.toHaveBeenCalledWith(t("bot.creating_session"));
+    });
+
+    it("drops a pending /ls attachment as a failed send does", async () => {
+      promptAttachment.set("D:\\Projects\\Repo\\src\\index.ts", "D:\\Projects\\Repo");
+      promptAttachment.setConfirmationMessageId(555);
+
+      await processUserPrompt(createContext(), "Explain this file", createDeps());
+
+      expect(promptAttachment.get()).toBeNull();
+      expect(mocked.interactionClearMock).toHaveBeenCalledWith("attachment_consumed");
+      expect(mocked.editMessageReplyMarkupMock).toHaveBeenCalledWith(777, 555);
+      expect(mocked.resolvePendingAttachmentMock).not.toHaveBeenCalled();
+    });
+
+    it("leaves a prompt started from the skills catalog to the send itself", async () => {
+      await processIncomingPrompt(createContext(), createIncomingPrompt("/review"), createDeps(), {
+        skipProjectFolderCheck: true,
+      });
+
+      expect(mocked.getMissingFolderNoticeMock).not.toHaveBeenCalled();
+      expect(mocked.safeBackgroundTaskMock).toHaveBeenCalled();
+    });
+
+    it("keeps a prompt for a busy session out of its inbox", async () => {
+      const ctx = createContext();
+
+      const admitted = await admitPromptToInbox(
+        ctx,
+        createIncomingPrompt("Also check tests"),
+        createDeps(),
+        "queue",
+      );
+
+      expect(admitted).toBeNull();
+      expect(ctx.reply).toHaveBeenCalledWith("folder gone notice");
+      expect(mocked.sessionPromptAsyncMock).not.toHaveBeenCalled();
+    });
   });
 
   it("registers suppression entry for text prompts", async () => {
@@ -242,6 +314,35 @@ describe("bot/handlers/prompt", () => {
       }),
     );
     expect(mocked.suppressionRegisterMock).toHaveBeenCalledWith("session-1", "Review README");
+  });
+
+  it("names a session it had to create as a new session while OpenCode has not named it", async () => {
+    mocked.currentSession = null;
+    mocked.sessionCreateMock.mockResolvedValueOnce({
+      data: { id: "session-2", title: "" },
+      error: null,
+    });
+    const ctx = createContext();
+    const baseDeps = createDeps();
+    const deps: ProcessPromptDeps = {
+      ...baseDeps,
+      keyboardManager: {
+        ...baseDeps.keyboardManager,
+        getContextInfo: vi.fn(() => null),
+      } as unknown as AppContainer["keyboardManager"],
+    };
+
+    await processUserPrompt(ctx, "Review README", deps);
+
+    expect(mocked.attachToSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: { id: "session-2", title: "", directory: "D:\\Projects\\Repo" },
+      }),
+    );
+    expect(ctx.reply).toHaveBeenCalledWith(
+      t("bot.session_created", { title: t("pinned.default_session_title") }),
+      expect.anything(),
+    );
   });
 
   it("starts prompts through promptAsync instead of the streaming prompt endpoint", async () => {
@@ -558,6 +659,80 @@ describe("bot/handlers/prompt", () => {
     expect(handled).toBe(false);
     expect(ctx.reply).toHaveBeenLastCalledWith(t("bot.photo_download_error"));
     expect(mocked.safeBackgroundTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("reads a photo's capabilities before checking whether the session is busy", async () => {
+    const getModelCapabilities = vi.fn().mockResolvedValue({ input: { image: true } });
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile: vi.fn().mockResolvedValue({
+        buffer: Buffer.from("photo"),
+        filePath: "photos/photo.jpg",
+      }),
+      getModelCapabilities,
+    };
+
+    await processIncomingPrompt(
+      createContext(),
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+    );
+
+    const firstCapabilitiesRead = defined(getModelCapabilities.mock.invocationCallOrder[0]);
+    const firstBusyCheck = defined(mocked.sessionStatusMock.mock.invocationCallOrder[0]);
+    expect(firstCapabilitiesRead).toBeLessThan(firstBusyCheck);
+  });
+
+  it("answers busy for a photo whose session started a run while its model was being read", async () => {
+    const ctx = createContext();
+    const downloadFile = vi.fn();
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile,
+      getModelCapabilities: vi.fn().mockImplementation(async () => {
+        mocked.sessionStatusMock.mockResolvedValue({
+          data: { "session-1": { type: "busy" } },
+          error: null,
+        });
+        return { input: { image: true } };
+      }),
+    };
+
+    const handled = await processIncomingPrompt(
+      ctx,
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+    );
+
+    expect(handled).toBe(false);
+    expect(ctx.reply).toHaveBeenCalledWith(t("bot.session_busy"));
+    expect(downloadFile).not.toHaveBeenCalled();
+  });
+
+  it("gates a photo sent into a running session's inbox by the model's capabilities", async () => {
+    const ctx = createContext();
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile: vi.fn(),
+      getModelCapabilities: vi.fn().mockResolvedValue({ input: { image: false } }),
+    };
+
+    const admitted = await admitPromptToInbox(
+      ctx,
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+      "steer",
+    );
+
+    expect(admitted).toBeNull();
+    expect(ctx.reply).toHaveBeenCalledWith(t("bot.photo_model_no_image"));
+    expect(deps.getModelCapabilities).toHaveBeenCalledTimes(1);
   });
 
   describe("pending /ls attachment", () => {

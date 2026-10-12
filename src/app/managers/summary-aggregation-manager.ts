@@ -1,9 +1,14 @@
 import { Event, ToolState } from "@opencode-ai/sdk/v2";
 import type { Bot } from "grammy";
 import type { CodeFileData } from "../formatters/summary-formatter.js";
-import { normalizePathForDisplay, prepareCodeFile } from "../formatters/summary-formatter.js";
-import type { Question } from "../types/question.js";
-import type { PermissionRequest } from "../types/permission.js";
+import {
+  formatPatchFileLine,
+  getPatchFileChanges,
+  normalizePathForDisplay,
+  prepareCodeFile,
+} from "../formatters/summary-formatter.js";
+import type { Question, QuestionSettledOutcome } from "../types/question.js";
+import type { PermissionReply, PermissionRequest } from "../types/permission.js";
 import type { FileChange } from "../types/summary.js";
 import { logger } from "../../utils/logger.js";
 import { extractErrorMessage } from "../../utils/opencode-error.js";
@@ -88,9 +93,16 @@ export interface ToolInfo {
   hasFileAttachment?: boolean | undefined;
 }
 
+/** A file a finished call changed; one without a document stays a text line. */
+export interface ToolFileEntry {
+  fileData: CodeFileData | null;
+  /** The file's own line, for a call that lists each file it changed. */
+  line?: string;
+}
+
 export interface ToolFileInfo extends ToolInfo {
   hasFileAttachment: true;
-  fileData: CodeFileData;
+  files: ToolFileEntry[];
 }
 
 type ToolCallback = (toolInfo: ToolInfo) => void;
@@ -102,6 +114,12 @@ type ToolFileCallback = (fileInfo: ToolFileInfo) => void;
 type QuestionCallback = (questions: Question[], requestID: string, sessionId: string) => void;
 
 type QuestionErrorCallback = (sessionId: string) => void;
+
+type QuestionSettledCallback = (
+  sessionId: string,
+  requestID: string,
+  outcome: QuestionSettledOutcome,
+) => void | Promise<void>;
 
 type ThinkingCallback = (update: ThinkingUpdate) => void;
 
@@ -119,7 +137,7 @@ type TokensCallback = (sessionId: string, tokens: TokensInfo, isCompleted: boole
 
 type CostCallback = (sessionId: string, cost: number) => void;
 
-export type SubagentStatus = "pending" | "running" | "completed" | "error";
+export type SubagentStatus = "pending" | "running" | "completed" | "error" | "interrupted";
 
 export interface SubagentInfo {
   cardId: string;
@@ -141,16 +159,32 @@ export interface SubagentInfo {
   currentToolCallId?: string | undefined;
   currentToolStartedAt?: number | undefined;
   terminalMessage?: string | undefined;
+  /** Launched in the background: the card outlives its parent's turn. */
+  background?: boolean | undefined;
+  /** When the newest of the nested subagents it launched, still running, started. */
+  launchStartedAt?: number | undefined;
+  /** A nested subagent it launched in the background still runs: the card outlives its parent's turn. */
+  waitsOnBackgroundLaunch?: boolean | undefined;
   createdAt: number;
   finishedAt?: number | undefined;
   updatedAt: number;
 }
 
-type SubagentCallback = (sessionId: string, subagents: SubagentInfo[]) => void;
+type SubagentCallback = (sessionId: string, subagents: SubagentInfo[]) => void | Promise<void>;
+
+/** The card keeps updating after its parent's turn ends. */
+export function outlivesParentTurn(subagent: SubagentInfo): boolean {
+  return Boolean(subagent.background || subagent.waitsOnBackgroundLaunch);
+}
 
 type SessionCompactedCallback = (sessionId: string, directory: string) => void;
 
-type SessionErrorCallback = (sessionId: string, message: string) => void;
+export interface SessionErrorInfo {
+  /** The run was stopped (OpenCode V1 reports a stop as an abort error), not failed. */
+  interrupted: boolean;
+}
+
+type SessionErrorCallback = (sessionId: string, message: string, errorInfo: SessionErrorInfo) => void;
 
 export interface SessionRetryInfo {
   sessionId: string;
@@ -161,11 +195,23 @@ export interface SessionRetryInfo {
 
 type SessionRetryCallback = (retryInfo: SessionRetryInfo) => void;
 
-type SessionIdleCallback = (sessionId: string) => void;
+export interface SessionIdleInfo {
+  /** OpenCode V2 stopped the execution instead of finishing it. */
+  interrupted: boolean;
+}
+
+type SessionIdleCallback = (sessionId: string, idleInfo: SessionIdleInfo) => void | Promise<void>;
 
 type PermissionCallback = (request: PermissionRequest) => void | Promise<void>;
 
-type PermissionRepliedCallback = (sessionId: string, requestID: string) => void | Promise<void>;
+type PermissionRepliedCallback = (
+  sessionId: string,
+  requestID: string,
+  reply: PermissionReply | null,
+) => void | Promise<void>;
+
+/** The run of the followed session or of one of its subagents ended (idle or error). */
+type SessionRunEndedCallback = (sessionId: string) => void | Promise<void>;
 
 type SessionDiffCallback = (sessionId: string, diffs: FileChange[]) => void;
 
@@ -173,8 +219,7 @@ type FileChangeCallback = (sessionId: string, change: FileChange) => void;
 
 type ClearedCallback = () => void;
 
-interface PreparedToolFileContext {
-  fileData: CodeFileData | null;
+interface PreparedToolFile extends ToolFileEntry {
   fileChange: FileChange | null;
 }
 
@@ -189,10 +234,23 @@ interface ThinkingMessageState {
   sections: Map<string, ThinkingSection>;
 }
 
+/** A nested subagent the card's own subagent launched, from the launch call's first event to its end. */
+interface SubagentLaunch {
+  startedAt: number;
+  background: boolean;
+  /** The call carries its arguments, so the launch may be shown. */
+  shown: boolean;
+}
+
+type SubagentEndStatus = Extract<SubagentStatus, "completed" | "error" | "interrupted">;
+
 interface SubagentState extends SubagentInfo {
   hasSubtaskMetadata: boolean;
   hasTaskToolMetadata: boolean;
   hasSessionTitleMetadata: boolean;
+  launches: Map<string, SubagentLaunch>;
+  /** Its own run ended while a background launch still runs; applied when that launch ends. */
+  heldEnd?: { status: SubagentEndStatus; terminalMessage?: string | undefined; finishedAt: number };
 }
 
 // When a model returns a response without a text block, the upstream provider
@@ -235,6 +293,23 @@ function isUpstreamEmptyResponseText(text: string, isFinal: boolean): boolean {
   }
 
   return isFinal ? trimmed.includes(UPSTREAM_EMPTY_RESPONSE_KEY) : true;
+}
+
+/** The V2 adapter marks the idle of an execution that was interrupted rather than finished. */
+function isInterruptedIdle(properties: object): boolean {
+  return "interrupted" in properties && properties.interrupted === true;
+}
+
+/** A `task` call launched in the background, flagged on its input or on its metadata. */
+function isBackgroundTaskCall(state: ToolState): boolean {
+  return (
+    state.input?.background === true || ("metadata" in state && state.metadata?.background === true)
+  );
+}
+
+/** OpenCode V1 reports a stopped run, or a stopped subagent, as this error. */
+function isAbortError(error: unknown): boolean {
+  return isRecord(error) && error.name === "MessageAbortedError";
 }
 
 function extractFirstUpdatedFileFromTitle(title: string): string {
@@ -296,6 +371,7 @@ export class SummaryAggregator {
   private onToolFileCallback: ToolFileCallback | null = null;
   private onQuestionCallback: QuestionCallback | null = null;
   private onQuestionErrorCallback: QuestionErrorCallback | null = null;
+  private onQuestionSettledCallback: QuestionSettledCallback | null = null;
   private onThinkingCallback: ThinkingCallback | null = null;
   private onThinkingFinishedCallback: ThinkingFinishedCallback | null = null;
   private onTokensCallback: TokensCallback | null = null;
@@ -308,6 +384,7 @@ export class SummaryAggregator {
   private onPermissionCallback: PermissionCallback | null = null;
   private permissionQueue: Promise<void> = Promise.resolve();
   private onPermissionRepliedCallback: PermissionRepliedCallback | null = null;
+  private onSessionRunEndedCallback: SessionRunEndedCallback | null = null;
   private onSessionDiffCallback: SessionDiffCallback | null = null;
   private onFileChangeCallback: FileChangeCallback | null = null;
   private onClearedCallback: ClearedCallback | null = null;
@@ -330,13 +407,25 @@ export class SummaryAggregator {
   private subagentStates: Map<string, SubagentState> = new Map();
   private subagentOrder: string[] = [];
   private subagentCardIdBySessionId: Map<string, string> = new Map();
+  // Child session ids whose task part announced a background launch, kept until
+  // the card attaches so a task part that arrives before session.created is honored.
+  private backgroundChildSessionIds = new Set<string>();
   private pendingSubagentCardIdsByParent: Map<string, string[]> = new Map();
   private pendingChildSessionIdsByParent: Map<string, string[]> = new Map();
   private fallbackSubagentCardIdsByParent: Map<string, string[]> = new Map();
+  // Root task calls still open, each with the card it was matched to once that is known.
+  private openTaskCalls: Map<string, { parentSessionId: string; cardId: string | null }> =
+    new Map();
   private finishedSubagentSessionIds: Set<string> = new Set();
+  // Ended sessions still tracked because a nested session hangs off them.
+  private endedTrackedSessionIds: Set<string> = new Set();
   private acceptsSubagentEvents = false;
   private subagentRunStartedAt = 0;
   private lastSubagentSnapshot = "";
+  // When the current session's running turn began, whoever started it; null between turns.
+  private liveTurnStartedAt: number | null = null;
+  /** Counts ends of the current session's turns, so a late status answer can tell one passed. */
+  private turnEndCount = 0;
 
   setBotAndChatId(bot: Bot, chatId: number): void {
     this.bot = bot;
@@ -373,6 +462,10 @@ export class SummaryAggregator {
 
   setOnQuestionError(callback: QuestionErrorCallback): void {
     this.onQuestionErrorCallback = callback;
+  }
+
+  setOnQuestionSettled(callback: QuestionSettledCallback): void {
+    this.onQuestionSettledCallback = callback;
   }
 
   setOnThinking(callback: ThinkingCallback): void {
@@ -419,6 +512,10 @@ export class SummaryAggregator {
     this.onPermissionRepliedCallback = callback;
   }
 
+  setOnSessionRunEnded(callback: SessionRunEndedCallback): void {
+    this.onSessionRunEndedCallback = callback;
+  }
+
   setOnSessionDiff(callback: SessionDiffCallback): void {
     this.onSessionDiffCallback = callback;
   }
@@ -429,6 +526,33 @@ export class SummaryAggregator {
 
   setOnCleared(callback: ClearedCallback): void {
     this.onClearedCallback = callback;
+  }
+
+  /** Start of the session's running turn, or null when it is not the current one or is idle. */
+  getLiveTurnStartedAt(sessionId: string): number | null {
+    return sessionId === this.currentSessionId ? this.liveTurnStartedAt : null;
+  }
+
+  /** Forgets the running turn: after a gap in the event stream its end may have been missed. */
+  forgetLiveTurn(): void {
+    this.liveTurnStartedAt = null;
+  }
+
+  /** A mark to pass to `startMissedLiveTurn`, taken before the session status is read. */
+  getTurnEndMark(): number {
+    return this.turnEndCount;
+  }
+
+  /**
+   * Starts the current session's turn from now when a busy status the stream missed says it
+   * runs, unless a turn already runs or one ended since the mark was taken.
+   */
+  startMissedLiveTurn(sessionId: string, mark: number): void {
+    if (sessionId !== this.currentSessionId || mark !== this.turnEndCount) {
+      return;
+    }
+
+    this.liveTurnStartedAt ??= Date.now();
   }
 
   holdOutbound(): void {
@@ -465,12 +589,32 @@ export class SummaryAggregator {
     }
   }
 
+  /**
+   * Runs a task through the outbound queue: now, or after the hold is drained while it is on.
+   */
+  runOutbound(task: () => void | Promise<void>): Promise<void> {
+    if (this.outboundHeld) {
+      this.deferredOutbound.push(task);
+      return Promise.resolve();
+    }
+
+    return Promise.resolve(task());
+  }
+
   private scheduleOutbound(task: () => void | Promise<void>, immediate: boolean): void {
     if (this.outboundHeld) {
       this.deferredOutbound.push(task);
       return;
     }
 
+    this.deliverOutbound(task, immediate);
+  }
+
+  /**
+   * Delivers past the hold: the dashboard's values (tokens, cost, files) are never held, only
+   * the redraws and messages that show them.
+   */
+  private deliverOutbound(task: () => void | Promise<void>, immediate: boolean): void {
     if (immediate) {
       setImmediate(() => {
         void Promise.resolve(task()).catch((err) => {
@@ -577,10 +721,10 @@ export class SummaryAggregator {
         this.handleQuestionAsked(event);
         break;
       case "question.replied":
-        logger.info(`[Aggregator] Question replied: requestID=${event.properties.requestID}`);
+        this.handleQuestionSettled(event.properties, "answered");
         break;
       case "question.rejected":
-        logger.info(`[Aggregator] Question rejected: requestID=${event.properties.requestID}`);
+        this.handleQuestionSettled(event.properties, "cancelled");
         break;
       case "session.diff":
         this.handleSessionDiff(event);
@@ -623,13 +767,18 @@ export class SummaryAggregator {
     this.subagentStates.clear();
     this.subagentOrder = [];
     this.subagentCardIdBySessionId.clear();
+    this.backgroundChildSessionIds.clear();
     this.pendingSubagentCardIdsByParent.clear();
     this.pendingChildSessionIdsByParent.clear();
     this.fallbackSubagentCardIdsByParent.clear();
+    this.openTaskCalls.clear();
     this.finishedSubagentSessionIds.clear();
+    this.endedTrackedSessionIds.clear();
     this.acceptsSubagentEvents = false;
     this.subagentRunStartedAt = 0;
     this.lastSubagentSnapshot = "";
+    this.liveTurnStartedAt = null;
+    this.turnEndCount++;
     this.permissionQueue = Promise.resolve();
     this.messageCount = 0;
 
@@ -646,6 +795,36 @@ export class SummaryAggregator {
 
   private isTrackedChildSession(sessionId: string): boolean {
     return this.trackedSessionParents.has(sessionId) && sessionId !== this.currentSessionId;
+  }
+
+  /** A subagent launched by another subagent: followed for its prompts, never given a card. */
+  private isNestedSubagentSession(sessionId: string): boolean {
+    const parentSessionId = this.trackedSessionParents.get(sessionId);
+    return Boolean(parentSessionId) && parentSessionId !== this.currentSessionId;
+  }
+
+  private hasTrackedChildren(sessionId: string): boolean {
+    for (const parentSessionId of this.trackedSessionParents.values()) {
+      if (parentSessionId === sessionId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Stops tracking an ended session. One a nested session still hangs off stays tracked, so
+   * that session's prompts still find the root, and goes with the last of them.
+   */
+  private untrackEndedSession(sessionId: string): void {
+    this.endedTrackedSessionIds.add(sessionId);
+    let current: string | null | undefined = sessionId;
+    while (current && this.endedTrackedSessionIds.has(current) && !this.hasTrackedChildren(current)) {
+      const parentSessionId = this.trackedSessionParents.get(current);
+      this.trackedSessionParents.delete(current);
+      this.endedTrackedSessionIds.delete(current);
+      current = parentSessionId;
+    }
   }
 
   /**
@@ -723,7 +902,11 @@ export class SummaryAggregator {
     }
   }
 
-  private retireSubagent(cardId: string): void {
+  /**
+   * Drops a card. A resumable one leaves its child known, so a later event of that child
+   * opens a new card instead of being ignored.
+   */
+  private retireSubagent(cardId: string, resumable = false): void {
     const state = this.subagentStates.get(cardId);
     if (!state) {
       return;
@@ -736,7 +919,11 @@ export class SummaryAggregator {
 
     if (state.sessionId) {
       this.subagentCardIdBySessionId.delete(state.sessionId);
-      this.trackedSessionParents.delete(state.sessionId);
+    }
+
+    if (state.sessionId && !resumable) {
+      this.backgroundChildSessionIds.delete(state.sessionId);
+      this.untrackEndedSession(state.sessionId);
       this.removeFromQueue(
         this.pendingChildSessionIdsByParent,
         state.parentSessionId,
@@ -748,10 +935,143 @@ export class SummaryAggregator {
     this.lastSubagentSnapshot = "";
   }
 
-  private retireAllSubagents(): void {
-    for (const cardId of [...this.subagentOrder]) {
-      this.retireSubagent(cardId);
+  private hasBackgroundLaunch(state: SubagentState): boolean {
+    return [...state.launches.values()].some((launch) => launch.background);
+  }
+
+  private getNewestLaunchStartedAt(state: SubagentState): number | undefined {
+    let newest: number | undefined;
+    for (const launch of state.launches.values()) {
+      if (launch.shown && (newest === undefined || launch.startedAt >= newest)) {
+        newest = launch.startedAt;
+      }
     }
+    return newest;
+  }
+
+  /**
+   * A card whose end is still to come past its parent's turn: a background one running, or
+   * interrupted by the bot while its child may still report the real end; or one waiting on
+   * a nested subagent it launched in the background.
+   */
+  private isFollowedBackgroundSubagent(cardId: string): boolean {
+    const state = this.subagentStates.get(cardId);
+    if (!state) {
+      return false;
+    }
+
+    if (state.status === "interrupted") {
+      // A held end already happened: there is no real end left to wait for.
+      return Boolean(state.background && !state.heldEnd);
+    }
+
+    return (
+      (state.status === "pending" || state.status === "running") &&
+      Boolean(state.background || this.hasBackgroundLaunch(state))
+    );
+  }
+
+  /** A turn boundary: a background subagent still running keeps its card and its events. */
+  private retireForegroundSubagents(): void {
+    for (const cardId of [...this.subagentOrder]) {
+      if (!this.isFollowedBackgroundSubagent(cardId)) {
+        this.retireSubagent(cardId);
+      }
+    }
+
+    // A call that never reported its end must not keep a later turn's pairing ambiguous.
+    for (const [callId, call] of this.openTaskCalls) {
+      if (!call.cardId || !this.subagentStates.has(call.cardId)) {
+        this.openTaskCalls.delete(callId);
+      }
+    }
+  }
+
+  /** Stops following background subagents; their cards stay as they were. */
+  retireBackgroundSubagents(): void {
+    for (const cardId of [...this.subagentOrder]) {
+      if (this.isFollowedBackgroundSubagent(cardId)) {
+        this.retireSubagent(cardId);
+      }
+    }
+  }
+
+  /**
+   * Ends every card still running as interrupted, timed to now. A foreground card is done
+   * with; a background one stays followed, so its child's real end, reported later, still
+   * replaces the mark. After a server restart every card is dropped, its child left
+   * resumable.
+   */
+  interruptSubagents(serverRestarted = false): void {
+    const now = Date.now();
+    let changed = false;
+    for (const cardId of this.subagentOrder) {
+      const state = this.subagentStates.get(cardId);
+      if (!state || (state.status !== "pending" && state.status !== "running")) {
+        continue;
+      }
+
+      state.status = "interrupted";
+      this.clearSubagentActivity(state);
+      state.launches.clear();
+      state.terminalMessage = undefined;
+      state.finishedAt = now;
+      state.updatedAt = now;
+      changed = true;
+    }
+
+    if (changed) {
+      this.emitSubagentState();
+    }
+
+    for (const cardId of [...this.subagentOrder]) {
+      if (serverRestarted) {
+        this.retireSubagent(cardId, true);
+      } else if (!this.isFollowedBackgroundSubagent(cardId)) {
+        this.retireSubagent(cardId);
+      }
+    }
+  }
+
+  private clearSubagentActivity(state: SubagentState): void {
+    state.currentTool = undefined;
+    state.currentToolInput = undefined;
+    state.currentToolTitle = undefined;
+    state.currentToolCallId = undefined;
+    state.currentToolStartedAt = undefined;
+  }
+
+  /** An interrupted card waits only for its child's real end; other events leave it be. */
+  private isInterruptedSubagentSession(sessionId: string): boolean {
+    const cardId = this.subagentCardIdBySessionId.get(sessionId);
+    return Boolean(cardId && this.subagentStates.get(cardId)?.status === "interrupted");
+  }
+
+  /** A card whose own run ended waits only for its background launches to end. */
+  private hasHeldEnd(sessionId: string): boolean {
+    const cardId = this.subagentCardIdBySessionId.get(sessionId);
+    return Boolean(cardId && this.subagentStates.get(cardId)?.heldEnd);
+  }
+
+  private markBackgroundSubagent(childSessionId: string): void {
+    const cardId = this.subagentCardIdBySessionId.get(childSessionId);
+    const state = cardId ? this.subagentStates.get(cardId) : undefined;
+    if (!state || state.background) {
+      return;
+    }
+
+    state.background = true;
+    this.emitSubagentState();
+  }
+
+  /** Applies a background intent recorded before the child's card attached. */
+  private applyPendingBackgroundIntent(sessionId: string, state: SubagentState): void {
+    if (!this.backgroundChildSessionIds.has(sessionId) || state.background) {
+      return;
+    }
+
+    state.background = true;
+    this.emitSubagentState();
   }
 
   private emitSubagentState(): void {
@@ -782,6 +1102,9 @@ export class SummaryAggregator {
         currentToolCallId: state.currentToolCallId,
         currentToolStartedAt: state.currentToolStartedAt,
         terminalMessage: state.terminalMessage,
+        background: state.background,
+        launchStartedAt: this.getNewestLaunchStartedAt(state),
+        waitsOnBackgroundLaunch: this.hasBackgroundLaunch(state),
         createdAt: state.createdAt,
         finishedAt: state.finishedAt,
         updatedAt: state.updatedAt,
@@ -808,6 +1131,9 @@ export class SummaryAggregator {
         currentToolCallId: subagent.currentToolCallId,
         currentToolStartedAt: subagent.currentToolStartedAt,
         terminalMessage: subagent.terminalMessage,
+        background: subagent.background,
+        launchStartedAt: subagent.launchStartedAt,
+        waitsOnBackgroundLaunch: subagent.waitsOnBackgroundLaunch,
         finishedAt: subagent.finishedAt,
       })),
     );
@@ -819,11 +1145,8 @@ export class SummaryAggregator {
     this.lastSubagentSnapshot = snapshot;
 
     const sessionId = this.currentSessionId;
-    this.scheduleOutbound(() => {
-      if (sessionId) {
-        this.onSubagentCallback?.(sessionId, subagents);
-      }
-    }, false);
+    // Returned, so a drain of held work waits for the cards to be drawn.
+    this.scheduleOutbound(() => this.onSubagentCallback?.(sessionId, subagents), false);
   }
 
   private createSubagentState(
@@ -852,6 +1175,7 @@ export class SummaryAggregator {
       hasSubtaskMetadata: false,
       hasTaskToolMetadata: false,
       hasSessionTitleMetadata: false,
+      launches: new Map(),
       createdAt: Date.now(),
     };
 
@@ -859,6 +1183,7 @@ export class SummaryAggregator {
     this.subagentOrder.push(cardId);
     if (sessionId) {
       this.subagentCardIdBySessionId.set(sessionId, cardId);
+      this.applyPendingBackgroundIntent(sessionId, state);
     }
     return state;
   }
@@ -938,24 +1263,83 @@ export class SummaryAggregator {
     state.updatedAt = Date.now();
     this.subagentCardIdBySessionId.set(sessionId, cardId);
     this.removeFromQueue(this.pendingSubagentCardIdsByParent, state.parentSessionId, cardId);
+    this.applyPendingBackgroundIntent(sessionId, state);
   }
 
-  private findNextSubagentForTaskTool(parentSessionId: string): SubagentState | null {
-    for (const cardId of this.subagentOrder) {
-      const state = this.subagentStates.get(cardId);
-      if (state && state.parentSessionId === parentSessionId && !state.hasTaskToolMetadata) {
-        return state;
+  /**
+   * The card a root task call belongs to: the card of the child session the call names,
+   * or - while it names none - the only card still waiting for its call, when this is
+   * the only call still waiting for a card. Any other guess could put one subagent's
+   * task on another subagent's card. An ended card is retired at once, so it never waits.
+   */
+  private findSubagentForTaskCall(
+    callId: string,
+    childSessionId: string | undefined,
+  ): SubagentState | null {
+    const call = this.openTaskCalls.get(callId);
+    if (!call) {
+      return null;
+    }
+
+    if (call.cardId) {
+      return this.subagentStates.get(call.cardId) ?? null;
+    }
+
+    let cardId: string | undefined;
+    if (childSessionId) {
+      cardId = this.subagentCardIdBySessionId.get(childSessionId);
+    } else {
+      const openCalls = [...this.openTaskCalls.values()];
+      const linkedCardIds = new Set(openCalls.map((openCall) => openCall.cardId));
+      const waitingCalls = openCalls.filter(
+        (openCall) => openCall.parentSessionId === call.parentSessionId && !openCall.cardId,
+      );
+      const waitingCards = this.subagentOrder
+        .map((orderedCardId) => this.subagentStates.get(orderedCardId))
+        .filter(
+          (state): state is SubagentState =>
+            state !== undefined &&
+            state.parentSessionId === call.parentSessionId &&
+            !state.hasTaskToolMetadata &&
+            !linkedCardIds.has(state.cardId),
+        );
+      if (waitingCalls.length === 1 && waitingCards.length === 1) {
+        cardId = waitingCards[0]!.cardId;
       }
     }
 
-    return null;
+    if (!cardId) {
+      return null;
+    }
+
+    call.cardId = cardId;
+    return this.subagentStates.get(cardId) ?? null;
   }
 
   private updateSubagentFromTaskTool(
     parentSessionId: string,
-    input?: { [key: string]: unknown },
+    callId: string,
+    state: ToolState,
   ): void {
-    const subagent = this.findNextSubagentForTaskTool(parentSessionId);
+    const status = "status" in state ? state.status : undefined;
+    const hasEnded = status === "completed" || status === "error";
+    if (!this.openTaskCalls.has(callId)) {
+      if (hasEnded) {
+        return;
+      }
+      this.openTaskCalls.set(callId, { parentSessionId, cardId: null });
+    }
+
+    const childSessionId =
+      "metadata" in state && typeof state.metadata?.sessionId === "string"
+        ? state.metadata.sessionId
+        : undefined;
+    const subagent = this.findSubagentForTaskCall(callId, childSessionId);
+    if (hasEnded) {
+      this.openTaskCalls.delete(callId);
+    }
+
+    const input = state.input;
     if (!subagent || !input) {
       return;
     }
@@ -1060,12 +1444,24 @@ export class SummaryAggregator {
       return;
     }
 
+    // Launched by a tracked subagent, it belongs to the live tree whenever it arrives: it is
+    // followed for its prompts and never gets a card.
+    if (info.parentID !== this.currentSessionId && this.isTrackedChildSession(info.parentID)) {
+      if (!this.trackedSessionParents.has(info.id)) {
+        this.trackedSessionParents.set(info.id, info.parentID);
+      }
+      return;
+    }
+
+    // A background subagent's card outlives the run that started it, so an update of
+    // its session arriving in a later run is not a stale discovery.
     const createdAt = info.time?.created;
     if (
-      !this.acceptsSubagentEvents ||
-      (this.subagentRunStartedAt > 0 &&
-        typeof createdAt === "number" &&
-        createdAt < this.subagentRunStartedAt)
+      !this.subagentCardIdBySessionId.has(info.id) &&
+      (!this.acceptsSubagentEvents ||
+        (this.subagentRunStartedAt > 0 &&
+          typeof createdAt === "number" &&
+          createdAt < this.subagentRunStartedAt))
     ) {
       this.finishedSubagentSessionIds.add(info.id);
       return;
@@ -1075,7 +1471,7 @@ export class SummaryAggregator {
       return;
     }
 
-    if (info.id === this.currentSessionId) {
+    if (info.id === this.currentSessionId || this.isInterruptedSubagentSession(info.id)) {
       return;
     }
 
@@ -1102,7 +1498,11 @@ export class SummaryAggregator {
     };
     cost?: number;
   }): void {
-    if (this.finishedSubagentSessionIds.has(info.sessionID)) {
+    if (
+      this.finishedSubagentSessionIds.has(info.sessionID) ||
+      this.isInterruptedSubagentSession(info.sessionID) ||
+      this.hasHeldEnd(info.sessionID)
+    ) {
       return;
     }
 
@@ -1143,12 +1543,23 @@ export class SummaryAggregator {
     input?: { [key: string]: unknown },
     title?: string,
   ): void {
-    if (this.finishedSubagentSessionIds.has(sessionId)) {
+    if (
+      this.finishedSubagentSessionIds.has(sessionId) ||
+      this.isInterruptedSubagentSession(sessionId)
+    ) {
       return;
     }
 
     const subagent = this.getOrCreateSubagentForSession(sessionId);
     const status = "status" in state ? state.status : undefined;
+
+    if (tool === "task" && !this.updateSubagentLaunch(subagent, callId, state)) {
+      return;
+    }
+
+    if (subagent.heldEnd) {
+      return;
+    }
 
     if (status === "running") {
       subagent.status = "running";
@@ -1162,7 +1573,7 @@ export class SummaryAggregator {
 
     if (callId && subagent.currentToolCallId !== callId) {
       subagent.currentToolCallId = callId;
-      subagent.currentToolStartedAt = Date.now();
+      subagent.currentToolStartedAt = subagent.launches.get(callId)?.startedAt ?? Date.now();
     }
 
     subagent.currentTool = tool;
@@ -1172,8 +1583,63 @@ export class SummaryAggregator {
     this.emitSubagentState();
   }
 
+  /**
+   * Records a `task` call of the card's own subagent - a nested subagent launch. Only its
+   * first event takes the line, and its end leaves the line to whatever runs next. Returns
+   * whether the event still goes on to the card's line.
+   */
+  private updateSubagentLaunch(subagent: SubagentState, callId: string, state: ToolState): boolean {
+    const status = "status" in state ? state.status : undefined;
+    const launch = subagent.launches.get(callId);
+
+    if (status === "completed" || status === "error") {
+      if (!launch) {
+        return false;
+      }
+
+      subagent.launches.delete(callId);
+      if (subagent.heldEnd && !this.hasBackgroundLaunch(subagent)) {
+        const { status: endStatus, terminalMessage, finishedAt } = subagent.heldEnd;
+        this.endSubagent(subagent, endStatus, terminalMessage, finishedAt);
+        return false;
+      }
+
+      if (subagent.currentToolCallId === callId) {
+        this.clearSubagentActivity(subagent);
+      }
+      subagent.updatedAt = Date.now();
+      this.emitSubagentState();
+      return false;
+    }
+
+    if (subagent.heldEnd) {
+      return false;
+    }
+
+    const shown = Object.keys(state.input ?? {}).length > 0;
+    const background = isBackgroundTaskCall(state);
+    if (!launch) {
+      subagent.launches.set(callId, { startedAt: Date.now(), background, shown });
+      return true;
+    }
+
+    launch.background ||= background;
+    launch.shown ||= shown;
+    if (subagent.currentToolCallId === callId) {
+      return true;
+    }
+
+    // An older launch reporting again: the line stays on what started after it.
+    this.emitSubagentState();
+    return false;
+  }
+
   private updateSubagentStepStart(sessionId: string, snapshot?: string): void {
-    if (this.finishedSubagentSessionIds.has(sessionId)) {
+    if (
+      this.finishedSubagentSessionIds.has(sessionId) ||
+      this.isInterruptedSubagentSession(sessionId) ||
+      this.hasHeldEnd(sessionId)
+    ) {
       return;
     }
 
@@ -1198,7 +1664,11 @@ export class SummaryAggregator {
     cost: number,
     snapshot?: string,
   ): void {
-    if (this.finishedSubagentSessionIds.has(sessionId)) {
+    if (
+      this.finishedSubagentSessionIds.has(sessionId) ||
+      this.isInterruptedSubagentSession(sessionId) ||
+      this.hasHeldEnd(sessionId)
+    ) {
       return;
     }
 
@@ -1222,7 +1692,7 @@ export class SummaryAggregator {
 
   private setSubagentTerminalStatus(
     sessionId: string,
-    status: Extract<SubagentStatus, "completed" | "error">,
+    status: SubagentEndStatus,
     terminalMessage?: string,
   ): void {
     const cardId = this.subagentCardIdBySessionId.get(sessionId);
@@ -1231,23 +1701,54 @@ export class SummaryAggregator {
     }
 
     const subagent = this.subagentStates.get(cardId);
-    if (!subagent) {
+    if (!subagent || subagent.heldEnd) {
       return;
     }
 
-    subagent.status = status;
-    subagent.currentTool = undefined;
-    subagent.currentToolInput = undefined;
-    subagent.currentToolTitle = undefined;
-    subagent.currentToolCallId = undefined;
-    subagent.currentToolStartedAt = undefined;
-    subagent.terminalMessage = terminalMessage?.trim() || undefined;
+    // Already marked interrupted: only a real finish or failure replaces the mark.
+    if (subagent.status === "interrupted" && status === "interrupted") {
+      this.retireSubagent(cardId);
+      return;
+    }
+
+    // A nested subagent it launched in the background still runs: the card keeps that
+    // launch's line and shows its own end once the launch ends.
+    if (subagent.status !== "interrupted" && this.hasBackgroundLaunch(subagent)) {
+      for (const [callId, launch] of subagent.launches) {
+        if (!launch.background) {
+          subagent.launches.delete(callId);
+        }
+      }
+      subagent.heldEnd = {
+        status,
+        terminalMessage: terminalMessage?.trim() || undefined,
+        finishedAt: Date.now(),
+      };
+      this.clearSubagentActivity(subagent);
+      subagent.updatedAt = Date.now();
+      this.emitSubagentState();
+      return;
+    }
+
     // Frozen on purpose: the card is re-rendered on a heartbeat, so a duration
     // derived from the current time would keep growing after the run ended.
-    subagent.finishedAt = Date.now();
+    this.endSubagent(subagent, status, terminalMessage, Date.now());
+  }
+
+  private endSubagent(
+    subagent: SubagentState,
+    status: SubagentEndStatus,
+    terminalMessage: string | undefined,
+    finishedAt: number,
+  ): void {
+    subagent.status = status;
+    this.clearSubagentActivity(subagent);
+    subagent.launches.clear();
+    subagent.terminalMessage = terminalMessage?.trim() || undefined;
+    subagent.finishedAt = finishedAt;
     subagent.updatedAt = Date.now();
     this.emitSubagentState();
-    this.retireSubagent(cardId);
+    this.retireSubagent(subagent.cardId);
   }
 
   private handleMessageUpdated(
@@ -1264,7 +1765,7 @@ export class SummaryAggregator {
     }
 
     if (this.isTrackedChildSession(info.sessionID)) {
-      if (info.role === "assistant") {
+      if (info.role === "assistant" && !this.isNestedSubagentSession(info.sessionID)) {
         this.updateSubagentFromAssistantMessage(info);
       }
       return;
@@ -1321,7 +1822,7 @@ export class SummaryAggregator {
           `[Aggregator] Tokens: input=${tokens.input}, output=${tokens.output}, reasoning=${tokens.reasoning}, cacheRead=${tokens.cacheRead}, cacheWrite=${tokens.cacheWrite}, completed=${isCompleted}`,
         );
         // Call synchronously so keyboardManager is updated before onComplete sends the reply
-        this.scheduleOutbound(
+        this.deliverOutbound(
           () => this.onTokensCallback?.(info.sessionID, tokens, isCompleted),
           false,
         );
@@ -1348,7 +1849,7 @@ export class SummaryAggregator {
         // Extract and report cost
         if (this.onCostCallback && assistantInfo.cost !== undefined) {
           logger.debug(`[Aggregator] Cost: $${assistantInfo.cost.toFixed(2)}`);
-          this.scheduleOutbound(
+          this.deliverOutbound(
             () => this.onCostCallback?.(info.sessionID, assistantInfo.cost),
             false,
           );
@@ -1394,7 +1895,15 @@ export class SummaryAggregator {
       return;
     }
 
+    if (this.isNestedSubagentSession(part.sessionID)) {
+      return;
+    }
+
     if (part.type === "subtask") {
+      // A subtask of a subagent would be a nested subagent, which gets no card.
+      if (!isCurrentRootSession) {
+        return;
+      }
       this.registerSubtaskPart(
         part.sessionID,
         part.id,
@@ -1528,7 +2037,22 @@ export class SummaryAggregator {
       const title = "title" in state ? state.title : undefined;
 
       if (part.tool === "task") {
-        this.updateSubagentFromTaskTool(part.sessionID, input);
+        this.updateSubagentFromTaskTool(part.sessionID, part.callID, state);
+
+        const childSessionId =
+          "metadata" in state && state.metadata ? state.metadata.sessionId : undefined;
+        // The running state is transient and the task part can land before the
+        // child card exists, so accept a completed state and a background flag
+        // carried on the metadata (a promoted foreground task) as well.
+        if (
+          "status" in state &&
+          (state.status === "running" || state.status === "completed") &&
+          isBackgroundTaskCall(state) &&
+          typeof childSessionId === "string"
+        ) {
+          this.backgroundChildSessionIds.add(childSessionId);
+          this.markBackgroundSubagent(childSessionId);
+        }
       }
 
       logger.debug(
@@ -1583,12 +2107,8 @@ export class SummaryAggregator {
         if (!this.processedToolStates.has(completedKey)) {
           this.processedToolStates.add(completedKey);
 
-          const preparedFileContext = this.prepareToolFileContext(
-            part.tool,
-            input,
-            title,
-            state.metadata,
-          );
+          const preparedFiles = this.prepareToolFiles(part.tool, input, title, state.metadata);
+          const hasFileAttachment = preparedFiles.some((file) => file.fileData);
 
           const toolData: ToolInfo = {
             sessionId: part.sessionID,
@@ -1599,7 +2119,7 @@ export class SummaryAggregator {
             input,
             title,
             metadata: state.metadata,
-            hasFileAttachment: !!preparedFileContext.fileData,
+            hasFileAttachment,
           };
 
           logger.debug(
@@ -1611,27 +2131,37 @@ export class SummaryAggregator {
             this.scheduleOutbound(() => callback(toolData), false);
           }
 
-          if (preparedFileContext.fileData && this.onToolFileCallback) {
+          if (hasFileAttachment && this.onToolFileCallback) {
             logger.debug(
-              `[Aggregator] Sending ${part.tool} file: ${preparedFileContext.fileData.filename} (${preparedFileContext.fileData.buffer.length} bytes)`,
+              `[Aggregator] Sending ${part.tool} files: ${preparedFiles
+                .map(({ fileData }) =>
+                  fileData ? `${fileData.filename} (${fileData.buffer.length} bytes)` : "text line",
+                )
+                .join(", ")}`,
             );
             const callback = this.onToolFileCallback;
-            const fileData = preparedFileContext.fileData;
+            const files = preparedFiles.map(({ fileData, line }): ToolFileEntry => ({
+              fileData,
+              ...(line !== undefined ? { line } : {}),
+            }));
             this.scheduleOutbound(
               () =>
                 callback({
                   ...toolData,
                   hasFileAttachment: true,
-                  fileData,
+                  files,
                 }),
               false,
             );
           }
 
-          if (preparedFileContext.fileChange && this.onFileChangeCallback) {
+          if (this.onFileChangeCallback) {
             const callback = this.onFileChangeCallback;
-            const fileChange = preparedFileContext.fileChange;
-            this.scheduleOutbound(() => callback(part.sessionID, fileChange), false);
+            for (const { fileChange } of preparedFiles) {
+              if (fileChange) {
+                this.deliverOutbound(() => callback(part.sessionID, fileChange), false);
+              }
+            }
           }
         }
       }
@@ -2040,12 +2570,12 @@ export class SummaryAggregator {
     return texts.filter((text) => !isUpstreamEmptyResponseText(text, isFinal)).join("");
   }
 
-  private prepareToolFileContext(
+  private prepareToolFiles(
     tool: string,
     input: { [key: string]: unknown } | undefined,
     title: string | undefined,
     metadata: { [key: string]: unknown } | undefined,
-  ): PreparedToolFileContext {
+  ): PreparedToolFile[] {
     if (tool === "write" && input) {
       const filePath =
         typeof input.filePath === "string" ? normalizePathForDisplay(input.filePath) : "";
@@ -2053,17 +2583,19 @@ export class SummaryAggregator {
       const hasContent = typeof input.content === "string";
 
       if (!filePath || !hasContent) {
-        return { fileData: null, fileChange: null };
+        return [];
       }
 
-      return {
-        fileData: prepareCodeFile(content, filePath, "write"),
-        fileChange: {
-          file: filePath,
-          additions: content.split("\n").length,
-          deletions: 0,
+      return [
+        {
+          fileData: prepareCodeFile(content, filePath, "write"),
+          fileChange: {
+            file: filePath,
+            additions: content.split("\n").length,
+            deletions: 0,
+          },
         },
-      };
+      ];
     }
 
     if (tool === "edit" && metadata) {
@@ -2075,20 +2607,35 @@ export class SummaryAggregator {
       const diffText = typeof metadata.diff === "string" ? metadata.diff : "";
 
       if (!filePath || !diffText) {
-        return { fileData: null, fileChange: null };
+        return [];
       }
 
-      return {
-        fileData: prepareCodeFile(diffText, filePath, "edit"),
-        fileChange: {
-          file: filePath,
-          additions: typeof filediff?.additions === "number" ? filediff.additions : 0,
-          deletions: typeof filediff?.deletions === "number" ? filediff.deletions : 0,
+      return [
+        {
+          fileData: prepareCodeFile(diffText, filePath, "edit"),
+          fileChange: {
+            file: filePath,
+            additions: typeof filediff?.additions === "number" ? filediff.additions : 0,
+            deletions: typeof filediff?.deletions === "number" ? filediff.deletions : 0,
+          },
         },
-      };
+      ];
     }
 
     if (tool === "apply_patch") {
+      const changes = getPatchFileChanges(metadata);
+      if (changes.length > 0) {
+        return changes.map((change) => ({
+          fileData: change.diff ? prepareCodeFile(change.diff, change.path, "edit") : null,
+          fileChange: {
+            file: change.path,
+            additions: change.additions,
+            deletions: change.deletions,
+          },
+          line: formatPatchFileLine(change),
+        }));
+      }
+
       const filediff = isRecord(metadata?.filediff) ? metadata.filediff : undefined;
 
       const filePathFromInput =
@@ -2111,7 +2658,7 @@ export class SummaryAggregator {
             : "";
 
       if (!filePath) {
-        return { fileData: null, fileChange: null };
+        return [];
       }
 
       const fileChange = filediff
@@ -2131,13 +2678,11 @@ export class SummaryAggregator {
             })()
           : null;
 
-      return {
-        fileData: diffText ? prepareCodeFile(diffText, filePath, "edit") : null,
-        fileChange,
-      };
+      const fileData = diffText ? prepareCodeFile(diffText, filePath, "edit") : null;
+      return fileData || fileChange ? [{ fileData, fileChange }] : [];
     }
 
-    return { fileData: null, fileChange: null };
+    return [];
   }
 
   private hashString(str: string): string {
@@ -2158,6 +2703,11 @@ export class SummaryAggregator {
     const { sessionID, status } = event.properties;
 
     if (sessionID !== this.currentSessionId) {
+      return;
+    }
+
+    if (status?.type === "busy") {
+      this.liveTurnStartedAt ??= Date.now();
       return;
     }
 
@@ -2188,10 +2738,18 @@ export class SummaryAggregator {
     },
   ): void {
     const { sessionID } = event.properties;
+    const interrupted = isInterruptedIdle(event.properties);
 
     if (this.isTrackedChildSession(sessionID)) {
-      logger.info(`[Aggregator] Subagent session became idle: ${sessionID}`);
-      this.setSubagentTerminalStatus(sessionID, "completed");
+      logger.info(
+        `[Aggregator] Subagent session became idle: ${sessionID}, interrupted=${interrupted}`,
+      );
+      if (this.isNestedSubagentSession(sessionID)) {
+        this.endNestedSubagentSession(sessionID);
+      } else {
+        this.setSubagentTerminalStatus(sessionID, interrupted ? "interrupted" : "completed");
+      }
+      this.emitSessionRunEnded(sessionID);
       return;
     }
 
@@ -2200,18 +2758,30 @@ export class SummaryAggregator {
     }
 
     logger.info(`[Aggregator] Session became idle: ${sessionID}`);
+    this.emitSessionRunEnded(sessionID);
+    this.liveTurnStartedAt = null;
+    this.turnEndCount++;
     this.acceptsSubagentEvents = false;
-    this.retireAllSubagents();
+    if (interrupted) {
+      this.interruptSubagents();
+    }
+    this.retireForegroundSubagents();
 
     // Stop typing indicator when session goes idle
     this.stopTypingIndicator();
 
     if (this.onSessionIdleCallback) {
       const callback = this.onSessionIdleCallback;
-      this.scheduleOutbound(() => {
-        callback(sessionID);
-      }, true);
+      const idleInfo: SessionIdleInfo = { interrupted };
+      // Returned, so a drain of held work waits for the run to be closed in the chat.
+      this.scheduleOutbound(() => callback(sessionID, idleInfo), true);
     }
+  }
+
+  /** A nested subagent has no card to end: it only stops being tracked. */
+  private endNestedSubagentSession(sessionId: string): void {
+    this.finishedSubagentSessionIds.add(sessionId);
+    this.untrackEndedSession(sessionId);
   }
 
   private handleSessionCompacted(
@@ -2252,25 +2822,40 @@ export class SummaryAggregator {
       logger.warn(`[Aggregator] session.error with unexpected error shape`, error);
     }
 
+    const interrupted = isAbortError(error);
+
     if (sessionID && this.isTrackedChildSession(sessionID)) {
       logger.warn(`[Aggregator] Subagent session error: ${sessionID}: ${message}`);
-      this.setSubagentTerminalStatus(sessionID, "error", message);
+      if (this.isNestedSubagentSession(sessionID)) {
+        this.endNestedSubagentSession(sessionID);
+      } else if (interrupted) {
+        this.setSubagentTerminalStatus(sessionID, "interrupted");
+      } else {
+        this.setSubagentTerminalStatus(sessionID, "error", message);
+      }
+      this.emitSessionRunEnded(sessionID);
       return;
     }
 
-    if (sessionID !== this.currentSessionId) {
+    if (!sessionID || sessionID !== this.currentSessionId) {
       return;
     }
 
     logger.warn(`[Aggregator] Session error: ${sessionID}: ${message}`);
+    this.emitSessionRunEnded(sessionID);
+    this.liveTurnStartedAt = null;
+    this.turnEndCount++;
     this.acceptsSubagentEvents = false;
-    this.retireAllSubagents();
+    if (interrupted) {
+      this.interruptSubagents();
+    }
+    this.retireForegroundSubagents();
     this.stopTypingIndicator();
 
     if (this.onSessionErrorCallback) {
       const callback = this.onSessionErrorCallback;
       this.scheduleOutbound(() => {
-        callback(sessionID, message);
+        callback(sessionID, message, { interrupted });
       }, true);
     }
   }
@@ -2281,15 +2866,18 @@ export class SummaryAggregator {
     },
   ): void {
     const { id, sessionID, questions } = event.properties;
+    const isTrackedChild = this.isTrackedChildSession(sessionID);
 
-    if (sessionID !== this.currentSessionId) {
+    if (sessionID !== this.currentSessionId && !isTrackedChild) {
       logger.debug(
         `[Aggregator] Ignoring question.asked for different session: ${sessionID} (current: ${this.currentSessionId})`,
       );
       return;
     }
 
-    logger.info(`[Aggregator] Question asked: requestID=${id}, questions=${questions.length}`);
+    logger.info(
+      `[Aggregator] Question asked: requestID=${id}, questions=${questions.length}, subagent=${isTrackedChild}`,
+    );
 
     if (this.onQuestionCallback) {
       const callback = this.onQuestionCallback;
@@ -2301,6 +2889,47 @@ export class SummaryAggregator {
         }
       }, true);
     }
+  }
+
+  private handleQuestionSettled(
+    properties: { sessionID: string; requestID: string },
+    outcome: QuestionSettledOutcome,
+  ): void {
+    const { sessionID, requestID } = properties;
+    if (sessionID !== this.currentSessionId && !this.isTrackedChildSession(sessionID)) {
+      logger.debug(
+        `[Aggregator] Ignoring settled question for different session: ${sessionID} (current: ${this.currentSessionId})`,
+      );
+      return;
+    }
+
+    logger.info(`[Aggregator] Question settled: requestID=${requestID}, outcome=${outcome}`);
+
+    if (this.onQuestionSettledCallback) {
+      const callback = this.onQuestionSettledCallback;
+      this.scheduleOutbound(async () => {
+        try {
+          await callback(sessionID, requestID, outcome);
+        } catch (err) {
+          logger.error("[Aggregator] Error in question settled callback:", err);
+        }
+      }, true);
+    }
+  }
+
+  private emitSessionRunEnded(sessionID: string): void {
+    if (!this.onSessionRunEndedCallback) {
+      return;
+    }
+
+    const callback = this.onSessionRunEndedCallback;
+    this.scheduleOutbound(async () => {
+      try {
+        await callback(sessionID);
+      } catch (err) {
+        logger.error("[Aggregator] Error in session run ended callback:", err);
+      }
+    }, true);
   }
 
   private handleSessionDiff(
@@ -2324,7 +2953,7 @@ export class SummaryAggregator {
       }));
 
       const callback = this.onSessionDiffCallback;
-      this.scheduleOutbound(() => {
+      this.deliverOutbound(() => {
         callback(properties.sessionID, diffs);
       }, true);
     }
@@ -2369,6 +2998,8 @@ export class SummaryAggregator {
     },
   ): void {
     const { sessionID, requestID } = event.properties;
+    // An older server may leave the decision out; the prompt then ends without naming it.
+    const reply: PermissionReply | null = event.properties.reply ?? null;
     const isCurrent = sessionID === this.currentSessionId;
     const isTrackedChild = this.isTrackedChildSession(sessionID);
 
@@ -2379,13 +3010,15 @@ export class SummaryAggregator {
       return;
     }
 
-    logger.info(`[Aggregator] Permission replied: requestID=${requestID}`);
+    logger.info(
+      `[Aggregator] Permission replied: requestID=${requestID}, reply=${reply ?? "unknown"}`,
+    );
 
     if (this.onPermissionRepliedCallback) {
       const callback = this.onPermissionRepliedCallback;
       this.scheduleOutbound(async () => {
         try {
-          await callback(sessionID, requestID);
+          await callback(sessionID, requestID, reply);
         } catch (err) {
           logger.error("[Aggregator] Error in permission replied callback:", err);
         }

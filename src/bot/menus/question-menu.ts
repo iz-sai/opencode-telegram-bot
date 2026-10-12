@@ -8,11 +8,20 @@ import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { t } from "../../i18n/index.js";
 import { editRenderedBotPart, sendRenderedBotPart } from "../messages/telegram-text.js";
 import type { TelegramRenderedPart, TelegramRichBlock } from "../render/types.js";
+import type {
+  Question,
+  QuestionInFlightEnding,
+  QuestionSettledOutcome,
+  QuestionState,
+} from "../../app/types/question.js";
+import { isOpencodeNotFoundError } from "../../utils/opencode-error.js";
+import { isRecord } from "../../utils/type-guards.js";
 
 const MAX_BUTTON_LENGTH = 60;
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 const TRUNCATION_SUFFIX = "…";
 const QUESTION_EMOJI = "❓";
+const CUSTOM_ANSWER_EMOJI = "✏️";
 
 export type QuestionInteractionDeps = Pick<AppContainer, "interactionManager">;
 
@@ -24,6 +33,34 @@ export type QuestionMenuDeps = Pick<
   AppContainer,
   "interactionManager" | "questionManager" | "summaryAggregator"
 >;
+
+/** Where a question sits in its poll, shown as `n/total` in its header. */
+interface QuestionProgress {
+  index: number;
+  total: number;
+}
+
+/** How OpenCode took a reply of the poll: accepted, gone (already settled) or not reached. */
+export type QuestionReplyResult = "accepted" | "gone" | "failed";
+
+/**
+ * A reply to a request OpenCode no longer has pending: not found on either version, or a V2
+ * form that was already settled.
+ */
+export function isQuestionRequestGone(error: unknown): boolean {
+  return (
+    isOpencodeNotFoundError(error) ||
+    (isRecord(error) &&
+      (error._tag === "QuestionNotFoundError" || error._tag === "FormAlreadySettledError"))
+  );
+}
+
+function getProgress(deps: QuestionDataDeps): QuestionProgress {
+  return {
+    index: deps.questionManager.getCurrentIndex(),
+    total: deps.questionManager.getTotalQuestions(),
+  };
+}
 
 function getCallbackMessageId(ctx: Context): number | null {
   const message = ctx.callbackQuery?.message;
@@ -84,7 +121,7 @@ export async function updateQuestionMessage(
     return;
   }
 
-  const part = formatQuestionDetailsPart(question, deps);
+  const part = formatQuestionDetailsPart(question, getProgress(deps));
   const keyboard = buildQuestionKeyboard(
     question,
     questionManager.getSelectedOptions(questionManager.getCurrentIndex()),
@@ -127,13 +164,13 @@ export async function showCurrentQuestion(
   const question = questionManager.getCurrentQuestion();
 
   if (!question) {
-    await showPollSummary(bot, chatId, deps);
+    await submitPollAnswers(bot, chatId, deps);
     return;
   }
 
   logger.debug(`[QuestionHandler] Showing question: ${question.header} - ${question.question}`);
 
-  const part = formatQuestionDetailsPart(question, deps);
+  const part = formatQuestionDetailsPart(question, getProgress(deps));
   const keyboard = buildQuestionKeyboard(
     question,
     questionManager.getSelectedOptions(questionManager.getCurrentIndex()),
@@ -141,6 +178,14 @@ export async function showCurrentQuestion(
   );
 
   logger.debug(`[QuestionHandler] Sending message with keyboard, chatId=${chatId}`);
+
+  // Until the message lands, a settle, reset or run end of this question is recorded for it.
+  const requestID = questionManager.getRequestID();
+  const sessionId = questionManager.getSessionId();
+  const progress = getProgress(deps);
+  if (requestID && sessionId) {
+    questionManager.trackInFlight(requestID, sessionId);
+  }
 
   try {
     const { messageId } = await sendRenderedBotPart({
@@ -151,6 +196,22 @@ export async function showCurrentQuestion(
         reply_markup: keyboard,
       },
     });
+
+    if (requestID) {
+      const ending = questionManager.getInFlightEnding(requestID);
+      questionManager.untrackInFlight(requestID);
+      const holdsSlot = questionManager.getRequestID() === requestID;
+      if (ending || !holdsSlot) {
+        await endLandedPoll(bot, chatId, messageId, question, progress, ending ?? "not_answered");
+        if (holdsSlot) {
+          // A run end leaves the slot to the poll: release it so waiting requests move on.
+          clearQuestionInteraction("question_not_answered", deps);
+          questionManager.clear();
+        }
+        return;
+      }
+    }
+
     questionManager.addMessageId(messageId);
 
     logger.debug(`[QuestionHandler] Message sent, messageId=${messageId}`);
@@ -165,6 +226,9 @@ export async function showCurrentQuestion(
 
     summaryAggregator.stopTypingIndicator();
   } catch (err) {
+    if (requestID) {
+      questionManager.untrackInFlight(requestID);
+    }
     questionManager.clear();
     clearQuestionInteraction("question_message_send_failed", deps);
 
@@ -180,85 +244,107 @@ export async function showNextQuestion(ctx: Context, deps: QuestionMenuDeps): Pr
     return;
   }
 
-  if (deps.questionManager.hasNextQuestion()) {
-    await showCurrentQuestion(ctx.api, ctx.chat.id, deps);
-  } else {
-    await showPollSummary(ctx.api, ctx.chat.id, deps);
-  }
+  await showCurrentQuestion(ctx.api, ctx.chat.id, deps);
 }
 
-async function showPollSummary(
+/**
+ * The poll message landed after its question had already ended: it keeps its text and gets
+ * the ending's line instead of live buttons, or goes when a newer poll replaced it.
+ */
+async function endLandedPoll(
   bot: Context["api"],
   chatId: number,
-  deps: QuestionStateDeps,
+  messageId: number,
+  question: Question,
+  progress: QuestionProgress,
+  ending: QuestionInFlightEnding,
+): Promise<void> {
+  logger.info(`[QuestionHandler] Poll landed after its question ended: ending=${ending}`);
+
+  if (ending === "replaced") {
+    await bot.deleteMessage(chatId, messageId).catch(() => {});
+    return;
+  }
+
+  const line =
+    ending === "not_answered"
+      ? t("question.not_answered")
+      : t(
+          ending === "answered"
+            ? "question.settled_outside.answered"
+            : "question.settled_outside.cancelled",
+        );
+  await editRenderedBotPart({
+    api: bot,
+    chatId,
+    messageId,
+    part: formatQuestionDetailsPart(question, progress, line),
+  }).catch((err) => {
+    logger.warn("[QuestionHandler] Failed to close the late poll message:", err);
+  });
+}
+
+/**
+ * Ends a poll dropped by a reset (`/abort`, `/new`, a session switch, ...): the message on
+ * screen keeps its text, loses its buttons and says it was not answered.
+ */
+export async function closeDroppedPoll(
+  bot: Context["api"],
+  chatId: number,
+  state: QuestionState,
+): Promise<void> {
+  const question = state.questions[state.currentIndex];
+  if (!question || state.activeMessageId === null) {
+    return;
+  }
+
+  logger.info(`[QuestionHandler] Poll dropped by a reset: requestID=${state.requestID}`);
+  await editRenderedBotPart({
+    api: bot,
+    chatId,
+    messageId: state.activeMessageId,
+    part: formatQuestionDetailsPart(
+      question,
+      { index: state.currentIndex, total: state.questions.length },
+      t("question.not_answered"),
+    ),
+  }).catch((err) => {
+    logger.warn("[QuestionHandler] Failed to close the dropped poll message:", err);
+  });
+}
+
+/**
+ * The last step of the poll was taken: its answers go to OpenCode in the background and the
+ * poll stays on screen, its buttons doing nothing, until OpenCode answers.
+ */
+export async function submitPollAnswers(
+  bot: Context["api"],
+  chatId: number,
+  deps: QuestionMenuDeps,
 ): Promise<void> {
   const { questionManager } = deps;
-  const answers = questionManager.getAllAnswers();
-  const totalQuestions = questionManager.getTotalQuestions();
+  const requestID = questionManager.getRequestID();
+  const directory = getCurrentSession()?.directory ?? getCurrentProject()?.worktree;
 
-  logger.info(
-    `[QuestionHandler] Poll completed: ${answers.length}/${totalQuestions} questions answered`,
+  questionManager.startAnswer();
+  syncQuestionInteractionState(
+    "callback",
+    questionManager.getCurrentIndex(),
+    questionManager.getActiveMessageId(),
+    deps,
   );
 
-  // Send all answers to the OpenCode API
-  await sendAllAnswersToAgent(bot, chatId, deps);
-
-  if (answers.length === 0) {
-    await bot.sendMessage(chatId, t("question.completed_no_answers"));
-  } else {
-    const summary = formatAnswersSummary(answers);
-    await bot.sendMessage(chatId, summary);
+  if (!requestID || !directory) {
+    // Nothing can be sent: the poll stays answerable and says the answer did not get through.
+    logger.error("[QuestionHandler] No requestID or project for sending answers");
+    await finishPollAnswers(bot, chatId, deps, requestID ?? "", "failed");
+    return;
   }
 
-  clearQuestionInteraction("question_completed", deps);
-  questionManager.clear();
-  logger.debug("[QuestionHandler] Poll completed and cleared");
-}
-
-async function sendAllAnswersToAgent(
-  bot: Context["api"],
-  chatId: number,
-  deps: QuestionDataDeps,
-): Promise<void> {
-  const { questionManager } = deps;
-  const currentProject = getCurrentProject();
-  const currentSession = getCurrentSession();
-  const requestID = questionManager.getRequestID();
   const totalQuestions = questionManager.getTotalQuestions();
-  const directory = currentSession?.directory ?? currentProject?.worktree;
-
-  if (!directory) {
-    logger.error("[QuestionHandler] No project for sending answers");
-    await bot.sendMessage(chatId, t("question.no_active_project"));
-    return;
-  }
-
-  if (!requestID) {
-    logger.error("[QuestionHandler] No requestID for sending answers");
-    await bot.sendMessage(chatId, t("question.no_active_request"));
-    return;
-  }
-
-  // Collect answers for all questions
-  // Format: Array<Array<string>> - for each question, an array of strings (selected options)
   const allAnswers: string[][] = [];
-
   for (let i = 0; i < totalQuestions; i++) {
-    const customAnswer = questionManager.getCustomAnswer(i);
-    const selectedAnswer = questionManager.getSelectedAnswer(i);
-
-    // Priority: custom answer > selected options
-    const answer = customAnswer || selectedAnswer || "";
-
-    if (answer) {
-      // Split by newlines if multiple options were selected (in multiple choice mode)
-      // Each option is formatted as "* Label: Description"
-      const answerParts = answer.split("\n").filter((part) => part.trim());
-      allAnswers.push(answerParts);
-    } else {
-      // Empty answer for unanswered questions
-      allAnswers.push([]);
-    }
+    allAnswers.push(questionManager.getReplyItems(i));
   }
 
   logger.info(
@@ -266,26 +352,237 @@ async function sendAllAnswersToAgent(
   );
   logger.debug(`[QuestionHandler] Answers payload:`, JSON.stringify(allAnswers, null, 2));
 
-  // CRITICAL: Fire-and-forget! Do not wait for question.reply to complete,
-  // otherwise it may block subsequent updates
+  // In the background: waiting here would block the update that took the last step.
   safeBackgroundTask({
     taskName: "question.reply",
-    task: () =>
-      opencodeClient.question.reply({
+    task: async (): Promise<QuestionReplyResult> => {
+      const { error } = await opencodeClient.question.reply({
         requestID,
         directory,
         answers: allAnswers,
-      }),
-    onSuccess: ({ error }) => {
-      if (error) {
-        logger.error("[QuestionHandler] Failed to send answers via question.reply:", error);
-        void bot.sendMessage(chatId, t("question.send_answers_error")).catch(() => {});
-        return;
+      });
+      if (!error) {
+        return "accepted";
       }
 
-      logger.info("[QuestionHandler] All answers sent to agent successfully via question.reply");
+      if (isQuestionRequestGone(error)) {
+        logger.info(`[QuestionHandler] Answers sent to a settled question: requestID=${requestID}`);
+        return "gone";
+      }
+
+      logger.error(
+        `[QuestionHandler] Failed to send answers via question.reply: requestID=${requestID}`,
+        error,
+      );
+      return "failed";
     },
+    onSuccess: (result) => finishPollAnswers(bot, chatId, deps, requestID, result),
+    onError: () => finishPollAnswers(bot, chatId, deps, requestID, "failed"),
   });
+}
+
+/**
+ * Ends the poll once OpenCode answered its reply, or leaves it answerable with a warning when
+ * the answers did not get through. A poll something else already ended stays as it is.
+ */
+async function finishPollAnswers(
+  bot: Context["api"],
+  chatId: number,
+  deps: QuestionMenuDeps,
+  requestID: string,
+  result: QuestionReplyResult,
+): Promise<void> {
+  const { questionManager } = deps;
+  if (!questionManager.isAnswering() || questionManager.getRequestID() !== requestID) {
+    logger.info(`[QuestionHandler] Answers finished for a poll already closed: ${requestID}`);
+    return;
+  }
+
+  const settled = questionManager.getSettledWhileSending();
+  logger.info(
+    `[QuestionHandler] Answers finished: requestID=${requestID}, result=${result}, settled=${settled ?? "none"}`,
+  );
+
+  if (result === "accepted" || (result === "failed" && settled === "answered")) {
+    // A lost reply still counts when OpenCode reported the question answered.
+    await completePoll(bot, chatId, deps);
+  } else if (result === "gone" || settled === "cancelled") {
+    await closeQuestionSettledOutside(bot, chatId, settled ?? "answered", deps);
+  } else {
+    questionManager.failAnswer();
+    await showQuestionDeliveryWarning(bot, chatId, deps);
+  }
+}
+
+/** OpenCode took the answers: the poll gives way to the summary of what was answered. */
+async function completePoll(
+  bot: Context["api"],
+  chatId: number,
+  deps: QuestionStateDeps,
+): Promise<void> {
+  const { questionManager } = deps;
+  const answers = questionManager.getAllAnswers();
+  const totalQuestions = questionManager.getTotalQuestions();
+  const messageId = questionManager.getActiveMessageId();
+  const requestID = questionManager.getRequestID();
+
+  logger.info(
+    `[QuestionHandler] Poll completed: ${answers.length}/${totalQuestions} questions answered`,
+  );
+
+  // The slot is released after the summary, so a waiting request never lands above it.
+  try {
+    if (messageId !== null) {
+      await bot.deleteMessage(chatId, messageId).catch(() => {});
+    }
+
+    if (answers.length === 0) {
+      await bot.sendMessage(chatId, t("question.completed_no_answers"));
+    } else {
+      await bot.sendMessage(chatId, formatAnswersSummary(answers));
+    }
+  } finally {
+    // A reset during the send may have let a newer poll into the slot: leave that one alone.
+    if (questionManager.getRequestID() === requestID) {
+      clearQuestionInteraction("question_completed", deps);
+      questionManager.clear();
+    }
+  }
+}
+
+/**
+ * Closes the poll on screen after OpenCode settled it outside Telegram: the question
+ * message keeps its text, loses its buttons and gets the outcome line, and the slot
+ * is released.
+ */
+export async function closeQuestionSettledOutside(
+  bot: Context["api"],
+  chatId: number,
+  outcome: QuestionSettledOutcome,
+  deps: QuestionStateDeps,
+): Promise<void> {
+  logger.info(
+    `[QuestionHandler] Poll settled outside Telegram: requestID=${deps.questionManager.getRequestID()}, outcome=${outcome}`,
+  );
+  await closeQuestionWithLine(
+    bot,
+    chatId,
+    t(
+      outcome === "answered"
+        ? "question.settled_outside.answered"
+        : "question.settled_outside.cancelled",
+    ),
+    "question_settled_outside",
+    deps,
+  );
+}
+
+/**
+ * Closes the poll on screen that OpenCode lost with its server (stopped or restarted): it
+ * keeps its text, loses its buttons and says it was not answered.
+ */
+export async function closeQuestionNotAnswered(
+  bot: Context["api"],
+  chatId: number,
+  deps: QuestionStateDeps,
+): Promise<void> {
+  logger.info(
+    `[QuestionHandler] Poll lost with the OpenCode server: requestID=${deps.questionManager.getRequestID()}`,
+  );
+  await closeQuestionWithLine(
+    bot,
+    chatId,
+    t("question.not_answered"),
+    "question_not_answered",
+    deps,
+  );
+}
+
+async function closeQuestionWithLine(
+  bot: Context["api"],
+  chatId: number,
+  line: string,
+  reason: "question_settled_outside" | "question_not_answered",
+  deps: QuestionStateDeps,
+): Promise<void> {
+  const { questionManager } = deps;
+  const question = questionManager.getCurrentQuestion();
+  const messageId = questionManager.getActiveMessageId();
+  const part = question ? formatQuestionDetailsPart(question, getProgress(deps), line) : null;
+
+  // Release the poll before the edit: the question tool's error, which follows a dismissal,
+  // must not find it active and delete it.
+  clearQuestionInteraction(reason, deps);
+  questionManager.clear();
+
+  if (part && messageId !== null) {
+    await editRenderedBotPart({ api: bot, chatId, messageId, part }).catch((err) => {
+      logger.warn("[QuestionHandler] Failed to close the poll message:", err);
+    });
+  }
+}
+
+/**
+ * Closes the poll after OpenCode took the dismissal sent by its Cancel button: the question
+ * message is replaced by the cancelled line, and the slot is released.
+ */
+export async function closeQuestionCancelled(
+  bot: Context["api"],
+  chatId: number,
+  deps: QuestionStateDeps,
+): Promise<void> {
+  const { questionManager } = deps;
+  const messageId = questionManager.getActiveMessageId();
+
+  // Released before the edit, like a poll settled outside Telegram.
+  questionManager.cancel();
+
+  if (messageId !== null) {
+    await bot.editMessageText(chatId, messageId, t("question.cancelled")).catch((err) => {
+      logger.warn("[QuestionHandler] Failed to close the cancelled poll message:", err);
+    });
+  }
+}
+
+/**
+ * The answers or the dismissal did not reach OpenCode: the question keeps its text and
+ * buttons and says so.
+ */
+export async function showQuestionDeliveryWarning(
+  bot: Context["api"],
+  chatId: number,
+  deps: QuestionDataDeps,
+): Promise<void> {
+  const { questionManager } = deps;
+  const question = questionManager.getCurrentQuestion();
+  const messageId = questionManager.getActiveMessageId();
+  if (!question || messageId === null) {
+    return;
+  }
+
+  await editRenderedBotPart({
+    api: bot,
+    chatId,
+    messageId,
+    part: formatQuestionDetailsPart(question, getProgress(deps), t("permission.delivery_failed")),
+    options: {
+      reply_markup: buildQuestionKeyboard(
+        question,
+        questionManager.getSelectedOptions(questionManager.getCurrentIndex()),
+        deps,
+      ),
+    },
+  }).catch((err) => {
+    // The warning from an earlier failed reply may still be on the poll.
+    if (!isMessageNotModifiedError(err)) {
+      logger.warn("[QuestionHandler] Failed to show the delivery warning in the poll:", err);
+    }
+  });
+}
+
+function isMessageNotModifiedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("message is not modified");
 }
 
 /** A paragraph of the question card: an optional bold lead-in plus regular text. */
@@ -383,10 +680,8 @@ function formatQuestionDetailsPart(question: {
   question: string;
   options: Array<{ label: string; description: string }>;
   multiple?: boolean;
-}, deps: QuestionDataDeps): TelegramRenderedPart {
-  const currentIndex = deps.questionManager.getCurrentIndex();
-  const totalQuestions = deps.questionManager.getTotalQuestions();
-  const progressText = totalQuestions > 0 ? `${currentIndex + 1}/${totalQuestions}` : "";
+}, progress: QuestionProgress, statusLine?: string): TelegramRenderedPart {
+  const progressText = progress.total > 0 ? `${progress.index + 1}/${progress.total}` : "";
 
   const headerTitle = [QUESTION_EMOJI, progressText, question.header].filter(Boolean).join(" ");
   const multiple = question.multiple ? t("question.multi_hint") : "";
@@ -406,10 +701,16 @@ function formatQuestionDetailsPart(question: {
     });
   }
 
+  // A status line closes the card and is never cut: the question text makes room for it.
+  const statusSegment: QuestionSegment | null = statusLine ? { rest: statusLine } : null;
+  const reserved = statusSegment ? segmentLength(statusSegment) + 2 : 0;
   const visibleSegments = truncateQuestionSegments(
     segments.filter((segment) => segmentLength(segment) > 0),
-    TELEGRAM_MESSAGE_LIMIT,
+    TELEGRAM_MESSAGE_LIMIT - reserved,
   );
+  if (statusSegment) {
+    visibleSegments.push(statusSegment);
+  }
 
   return {
     blocks: visibleSegments.map(segmentToBlock),
@@ -423,7 +724,11 @@ function isHighSurrogate(codeUnit: number): boolean {
 }
 
 function buildQuestionKeyboard(
-  question: { options: Array<{ label: string; description: string }>; multiple?: boolean },
+  question: {
+    options: Array<{ label: string; description: string }>;
+    multiple?: boolean;
+    custom?: boolean;
+  },
   selectedOptions: Set<number>,
   deps: QuestionDataDeps,
 ): InlineKeyboard {
@@ -444,13 +749,24 @@ function buildQuestionKeyboard(
     keyboard.text(buttonText, callbackData).row();
   });
 
+  const customAnswer = deps.questionManager.getCustomAnswer(questionIndex);
+  if (question.multiple && customAnswer) {
+    const icon = deps.questionManager.isCustomAnswerSelected(questionIndex) ? "✅ " : "";
+    const label = `${CUSTOM_ANSWER_EMOJI} ${customAnswer.replace(/\s*\n\s*/g, " ")}`;
+    keyboard.text(formatButtonText(label, icon), `question:toggle_custom:${questionIndex}`).row();
+    logger.debug(`[QuestionHandler] Added custom answer row`);
+  }
+
   if (question.multiple) {
     keyboard.text(t("question.button.submit"), `question:submit:${questionIndex}`).row();
     logger.debug(`[QuestionHandler] Added submit button`);
   }
 
-  keyboard.text(t("question.button.custom"), `question:custom:${questionIndex}`).row();
-  logger.debug(`[QuestionHandler] Added custom answer button`);
+  // A question without choices can only be answered with custom text
+  if (question.options.length === 0 || question.custom !== false) {
+    keyboard.text(t("question.button.custom"), `question:custom:${questionIndex}`).row();
+    logger.debug(`[QuestionHandler] Added custom answer button`);
+  }
 
   keyboard.text(t("question.button.cancel"), `question:cancel:${questionIndex}`);
   logger.debug(`[QuestionHandler] Added cancel button`);

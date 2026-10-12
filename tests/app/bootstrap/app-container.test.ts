@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => ({
   stopEventListening: vi.fn(),
+  stopModelCatalogWait: vi.fn(),
 }));
 
 vi.mock("../../../src/opencode/events.js", () => ({
   subscribeToEvents: vi.fn(),
   stopEventListening: mocked.stopEventListening,
+}));
+
+vi.mock("../../../src/opencode/ready-refresh.js", () => ({
+  stopModelCatalogWait: mocked.stopModelCatalogWait,
 }));
 
 import { logger } from "../../../src/utils/logger.js";
@@ -18,6 +23,7 @@ describe("app/bootstrap/app-container", () => {
 
   beforeEach(() => {
     mocked.stopEventListening.mockReset();
+    mocked.stopModelCatalogWait.mockReset();
     container = createTestAppContainer();
   });
 
@@ -39,7 +45,7 @@ describe("app/bootstrap/app-container", () => {
   it("opens every stateful interaction on its own interaction slot", () => {
     container.questionManager.startQuestions(
       [{ header: "Q1", question: "Pick one", options: [{ label: "Yes", description: "" }] }],
-      "req-1",
+      "req-1", "session-1",
     );
     expect(container.interactionManager.getSnapshot()?.kind).toBe("question");
     container.interactionManager.reset("test_reset");
@@ -129,10 +135,16 @@ describe("app/bootstrap/app-container", () => {
     expect(runClear).toHaveBeenCalledWith("test_shutdown");
   });
 
+  it("stops the model catalog wait on process cleanup", () => {
+    container.cleanupProcess("test_shutdown");
+
+    expect(mocked.stopModelCatalogWait).toHaveBeenCalledTimes(1);
+  });
+
   it("drops the open interaction on the interactions reset", () => {
     container.questionManager.startQuestions(
       [{ header: "Q1", question: "Pick one", options: [{ label: "Yes", description: "" }] }],
-      "req-1",
+      "req-1", "session-1",
     );
     expect(container.interactionManager.getSnapshot()?.kind).toBe("question");
 
@@ -144,7 +156,7 @@ describe("app/bootstrap/app-container", () => {
   it("drops only the interaction of the failed scope on the interaction-error reset", () => {
     container.questionManager.startQuestions(
       [{ header: "Q1", question: "Pick one", options: [{ label: "Yes", description: "" }] }],
-      "req-1",
+      "req-1", "session-1",
     );
 
     container.resetInteractionError("permission", "test_error");

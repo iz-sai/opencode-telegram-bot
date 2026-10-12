@@ -10,6 +10,7 @@ const botVersion = (JSON.parse(readFileSync("package.json", "utf-8")) as { versi
 const mocked = vi.hoisted(() => ({
   healthMock: vi.fn(),
   getCurrentSessionMock: vi.fn(),
+  fetchSessionTitleMock: vi.fn(),
   getCurrentProjectMock: vi.fn(),
   fetchCurrentAgentMock: vi.fn(),
   fetchCurrentModelMock: vi.fn(),
@@ -22,6 +23,7 @@ const mocked = vi.hoisted(() => ({
   pinnedGetContextLimitMock: vi.fn(),
   pinnedRefreshContextLimitMock: vi.fn(),
   pinnedGetContextInfoMock: vi.fn(),
+  pinnedWaitForSessionValuesMock: vi.fn(),
   sendBotTextMock: vi.fn(),
   loggerDebugMock: vi.fn(),
   loggerInfoMock: vi.fn(),
@@ -44,10 +46,13 @@ vi.mock("../../../src/opencode/client.js", () => ({
       health: mocked.healthMock,
     },
   },
+  opencodeServerVersion: "v1",
+  probeOpencodeServer: async () => ({ kind: "none" }),
 }));
 
 vi.mock("../../../src/app/services/session-service.js", () => ({
   getCurrentSession: mocked.getCurrentSessionMock,
+  fetchSessionTitle: mocked.fetchSessionTitleMock,
 }));
 
 vi.mock("../../../src/app/stores/settings-store.js", () => ({
@@ -83,6 +88,7 @@ function createDeps() {
       getContextLimit: mocked.pinnedGetContextLimitMock,
       refreshContextLimit: mocked.pinnedRefreshContextLimitMock,
       getContextInfo: mocked.pinnedGetContextInfoMock,
+      waitForSessionValues: mocked.pinnedWaitForSessionValuesMock,
     } as never,
   });
 }
@@ -91,6 +97,7 @@ describe("bot/commands/status-command", () => {
   beforeEach(() => {
     mocked.healthMock.mockReset();
     mocked.getCurrentSessionMock.mockReset();
+    mocked.fetchSessionTitleMock.mockReset();
     mocked.getCurrentProjectMock.mockReset();
     mocked.fetchCurrentAgentMock.mockReset();
     mocked.fetchCurrentModelMock.mockReset();
@@ -103,6 +110,8 @@ describe("bot/commands/status-command", () => {
     mocked.pinnedGetContextLimitMock.mockReset();
     mocked.pinnedRefreshContextLimitMock.mockReset();
     mocked.pinnedGetContextInfoMock.mockReset();
+    mocked.pinnedWaitForSessionValuesMock.mockReset();
+    mocked.pinnedWaitForSessionValuesMock.mockResolvedValue(undefined);
     mocked.sendBotTextMock.mockReset();
     mocked.loggerDebugMock.mockReset();
     mocked.loggerInfoMock.mockReset();
@@ -111,6 +120,7 @@ describe("bot/commands/status-command", () => {
 
     mocked.healthMock.mockResolvedValue({ data: { healthy: true, version: "1.0.0" }, error: null });
     mocked.getCurrentSessionMock.mockReturnValue({ id: "s1", title: "S", directory: "/repo" });
+    mocked.fetchSessionTitleMock.mockResolvedValue("S");
     mocked.getCurrentProjectMock.mockReturnValue({ id: "p1", worktree: "/repo", name: "Repo" });
     mocked.fetchCurrentAgentMock.mockResolvedValue("build");
     mocked.fetchCurrentModelMock.mockReturnValue({ providerID: "openai", modelID: "gpt-5" });
@@ -121,6 +131,26 @@ describe("bot/commands/status-command", () => {
     mocked.pinnedRefreshContextLimitMock.mockResolvedValue(undefined);
     mocked.pinnedGetContextInfoMock.mockReturnValue(null);
     mocked.sendBotTextMock.mockResolvedValue(undefined);
+  });
+
+  it("reads the session's context only once its values have loaded", async () => {
+    let loaded = false;
+    mocked.pinnedWaitForSessionValuesMock.mockImplementation(async () => {
+      loaded = true;
+    });
+    mocked.pinnedGetContextInfoMock.mockImplementation(() =>
+      loaded ? { tokensUsed: 5000, tokensLimit: 10000 } : { tokensUsed: 0, tokensLimit: 10000 },
+    );
+    const ctx = {
+      chat: { id: 42, type: "private" },
+      message: { text: "/status" },
+      api: {},
+      reply: vi.fn(),
+    } as unknown as Context;
+
+    await statusCommand(ctx as never, createDeps());
+
+    expect(mocked.keyboardUpdateContextMock).toHaveBeenCalledWith(5000, 10000);
   });
 
   it("includes bot and OpenCode versions and omits health and audio replies", async () => {
@@ -282,5 +312,43 @@ describe("bot/commands/status-command", () => {
     const message = mocked.sendBotTextMock.mock.calls[0]?.[0]?.text as string;
     expect(message).toContain("Model: 🧠 openai/gpt-5");
     expect(message).not.toContain("gpt-5 (");
+  });
+
+  it("names the current session with the title OpenCode has for it now", async () => {
+    mocked.getCurrentSessionMock.mockReturnValue({ id: "s1", title: "", directory: "/repo" });
+    mocked.fetchSessionTitleMock.mockResolvedValue("Greeting message");
+
+    const ctx = {
+      chat: { id: 42, type: "private" },
+      message: { text: "/status" },
+      api: {},
+      reply: vi.fn(),
+    } as unknown as Context;
+
+    await statusCommand(ctx as never, createDeps());
+
+    expect(mocked.fetchSessionTitleMock).toHaveBeenCalledWith({
+      id: "s1",
+      title: "",
+      directory: "/repo",
+    });
+    const message = mocked.sendBotTextMock.mock.calls[0]?.[0]?.text as string;
+    expect(message).toContain("Current session: Greeting message");
+  });
+
+  it("shows a session OpenCode has not named yet as a new session", async () => {
+    mocked.fetchSessionTitleMock.mockResolvedValue("");
+
+    const ctx = {
+      chat: { id: 42, type: "private" },
+      message: { text: "/status" },
+      api: {},
+      reply: vi.fn(),
+    } as unknown as Context;
+
+    await statusCommand(ctx as never, createDeps());
+
+    const message = mocked.sendBotTextMock.mock.calls[0]?.[0]?.text as string;
+    expect(message).toContain("Current session: new session");
   });
 });

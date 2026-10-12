@@ -7,6 +7,7 @@ import {
   OpencodeReadyLifecycle,
   type OpencodeReadyHandler,
 } from "../../opencode/ready-lifecycle.js";
+import { stopModelCatalogWait } from "../../opencode/ready-refresh.js";
 import { logger } from "../../utils/logger.js";
 import { AssistantRunState } from "../managers/assistant-run-state-manager.js";
 import { AttachManager } from "../managers/attach-manager.js";
@@ -19,6 +20,7 @@ import { QuestionManager } from "../managers/question-manager.js";
 import { RenameManager } from "../managers/rename-manager.js";
 import { TaskCreationManager } from "../managers/scheduled-task-creation-manager.js";
 import { SummaryAggregator } from "../managers/summary-aggregation-manager.js";
+import { HealthServer } from "../services/health-server-service.js";
 import { ScheduledTaskRuntime } from "../services/scheduled-task-runtime-service.js";
 
 const HEARTBEAT_INTERVAL_MS = 5000;
@@ -37,6 +39,7 @@ export interface AppContainer {
   readonly backgroundSessionTracker: BackgroundSessionTracker;
   readonly externalUserInputSuppressionManager: ExternalUserInputSuppressionManager;
   readonly foregroundSessionState: ForegroundSessionState;
+  readonly healthServer: HealthServer;
   readonly interactionManager: InteractionManager;
   readonly keyboardManager: KeyboardManager;
   readonly opencodeAutoRestartService: OpencodeAutoRestartService;
@@ -64,7 +67,24 @@ export interface AppContainer {
   resetAggregator(): void;
   /** Clears response streams, tool trackers, background tracking and run state. */
   resetRuntimeStreams(reason: string): void;
-  /** Stops ready-restore, event listening and the heartbeat, and clears runtime state. */
+  /** Stops following background operations; their lines and cards stay as they are. */
+  stopBackgroundOperations(reason: string, sessionId?: string): void;
+  /** Stops following background command lines only; subagent cards keep being followed. */
+  stopBackgroundCommands(reason: string, sessionId?: string): void;
+  /**
+   * Ends the followed session's running subagent cards as interrupted; a background one
+   * still takes the real end its subagent reports later.
+   */
+  interruptSubagents(reason: string): void;
+  /**
+   * On V2, ends the followed session's run in the chat as after `/abort` once its server
+   * is gone: the poll on screen closes as not answered, running lines end, no footer.
+   */
+  endRunLostWithServer(reason: string): Promise<void>;
+  /**
+   * Stops ready-restore, the model catalog wait, event listening and the heartbeat,
+   * and clears runtime state.
+   */
   cleanupProcess(reason: string): void;
 }
 
@@ -95,6 +115,7 @@ export function createAppContainer(): AppContainer {
     backgroundSessionTracker: new BackgroundSessionTracker(),
     externalUserInputSuppressionManager: new ExternalUserInputSuppressionManager(),
     foregroundSessionState,
+    healthServer: new HealthServer(),
     interactionManager,
     keyboardManager: new KeyboardManager(),
     opencodeAutoRestartService: new OpencodeAutoRestartService(opencodeReadyLifecycle),
@@ -130,9 +151,16 @@ export function createAppContainer(): AppContainer {
     resetInteractionError: (scope, reason) => interactionManager.clearErrorScope(scope, reason),
     resetAggregator: () => summaryAggregator.clear(),
     resetRuntimeStreams: (reason) => eventSubscriptionService.clearRuntimeState(reason),
+    stopBackgroundOperations: (reason, sessionId) =>
+      eventSubscriptionService.stopBackgroundOperations(reason, sessionId),
+    stopBackgroundCommands: (reason, sessionId) =>
+      eventSubscriptionService.stopBackgroundCommands(reason, sessionId),
+    interruptSubagents: (reason) => eventSubscriptionService.interruptSubagents(reason),
+    endRunLostWithServer: (reason) => eventSubscriptionService.endRunLostWithServer(reason),
 
     cleanupProcess: (reason) => {
       stopReadyRestore();
+      stopModelCatalogWait();
       eventSubscriptionService.cleanup(reason);
       stopHeartbeat();
     },

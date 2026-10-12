@@ -1,8 +1,9 @@
 import { CommandContext, Context } from "grammy";
 import type { AppContainer } from "../../app/bootstrap/app-container.js";
-import { opencodeClient } from "../../opencode/client.js";
+import { checkOpencodeHealth } from "../../opencode/server-health.js";
 import { getGitWorktreeContext } from "../../app/services/worktree-service.js";
-import { getCurrentSession } from "../../app/services/session-service.js";
+import { fetchSessionTitle, getCurrentSession } from "../../app/services/session-service.js";
+import { formatSessionTitle } from "../../app/formatters/session-title-formatter.js";
 import { getCurrentProject } from "../../app/stores/settings-store.js";
 import { fetchCurrentAgent } from "../../app/services/agent-selection-service.js";
 import { fetchCurrentModel } from "../../app/services/model-selection-service.js";
@@ -17,17 +18,17 @@ export type StatusCommandDeps = Pick<AppContainer, "keyboardManager" | "pinnedMe
 
 export async function statusCommand(ctx: CommandContext<Context>, deps: StatusCommandDeps) {
   try {
-    const { data, error } = await opencodeClient.global.health();
+    const health = await checkOpencodeHealth();
 
-    if (error || !data) {
-      throw error || new Error("No data received from server");
+    if (!health.healthy) {
+      throw health.error || new Error("No data received from server");
     }
 
     const botVersion = await getBotVersion();
     let message = `${t("status.header_running")}\n\n`;
     message += `${t("status.line.bot_version", { version: botVersion })}\n`;
-    if (data.version) {
-      message += `${t("status.line.version", { version: data.version })}\n`;
+    if (health.version) {
+      message += `${t("status.line.version", { version: health.version })}\n`;
     }
 
     // Add agent information
@@ -75,7 +76,8 @@ export async function statusCommand(ctx: CommandContext<Context>, deps: StatusCo
 
     const currentSession = getCurrentSession();
     if (currentSession) {
-      message += `\n${t("status.session_selected", { title: currentSession.title })}\n`;
+      const title = formatSessionTitle(await fetchSessionTitle(currentSession));
+      message += `\n${t("status.session_selected", { title })}\n`;
     } else {
       message += `\n${t("status.session_not_selected")}\n`;
       message += t("status.session_hint");
@@ -91,6 +93,8 @@ export async function statusCommand(ctx: CommandContext<Context>, deps: StatusCo
       }
       deps.keyboardManager.initialize(ctx.api, ctx.chat.id);
     }
+    // A session change or restore still loading answers with its values, not the previous ones
+    await deps.pinnedMessageManager.waitForSessionValues();
     // Sync current context (tokens used + limit) into keyboard state
     const contextInfo = deps.pinnedMessageManager.getContextInfo();
     if (contextInfo) {

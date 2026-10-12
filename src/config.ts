@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
 import { getRuntimePaths } from "./runtime/paths.js";
+import { isContainerRuntime } from "./runtime/container.js";
+import { BOT_HEALTH_PORT_ENV, resolveHealthPort } from "./runtime/health-port.js";
 import { normalizeLocale, type Locale } from "./i18n/index.js";
 
 const runtimePaths = getRuntimePaths();
@@ -84,6 +86,18 @@ function getOptionalBooleanEnvVar(key: string, defaultValue: boolean): boolean {
   }
 
   return defaultValue;
+}
+
+export type OpencodeServerVersion = "v1" | "v2";
+
+const DEFAULT_OPENCODE_API_URLS: Record<OpencodeServerVersion, string> = {
+  v1: "http://localhost:4096",
+  v2: "http://127.0.0.1:49374",
+};
+
+function getOptionalOpencodeServerVersionEnvVar(key: string): OpencodeServerVersion {
+  const normalized = getEnvVar(key, false).trim().toLowerCase();
+  return normalized === "v2" ? "v2" : "v1";
 }
 
 function getOptionalMessageFormatModeEnvVar(
@@ -201,10 +215,14 @@ export function buildTelegramConfig(): {
   };
 }
 
+const opencodeServerVersion = getOptionalOpencodeServerVersionEnvVar("OPENCODE_SERVER_VERSION");
+
 export const config = {
   telegram: buildTelegramConfig(),
   opencode: {
-    apiUrl: getEnvVar("OPENCODE_API_URL", false) || "http://localhost:4096",
+    serverVersion: opencodeServerVersion,
+    apiUrl:
+      getEnvVar("OPENCODE_API_URL", false) || DEFAULT_OPENCODE_API_URLS[opencodeServerVersion],
     username: getEnvVar("OPENCODE_SERVER_USERNAME", false) || "opencode",
     password: getEnvVar("OPENCODE_SERVER_PASSWORD", false),
     autoRestartEnabled: getOptionalBooleanEnvVar("OPENCODE_AUTO_RESTART_ENABLED", false),
@@ -216,6 +234,9 @@ export const config = {
   },
   server: {
     logLevel: getEnvVar("LOG_LEVEL", false) || "info",
+  },
+  health: {
+    port: resolveHealthPort(getEnvVar(BOT_HEALTH_PORT_ENV, false), isContainerRuntime()),
   },
   bot: {
     sessionsListLimit: getOptionalPositiveIntEnvVar("SESSIONS_LIST_LIMIT", 10),

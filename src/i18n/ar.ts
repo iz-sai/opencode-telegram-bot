@@ -33,6 +33,7 @@ export const ar: I18nDictionary = {
   "cmd.description.mcps": "خوادم MCP",
   "cmd.description.opencode_start": "تشغيل خادم OpenCode",
   "cmd.description.opencode_stop": "إيقاف خادم OpenCode",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "استعراض ملفات المجلد",
   "cmd.description.help": "المساعدة",
   "cmd.description.rename": "تغيير اسم الجلسة الحالية",
@@ -95,6 +96,10 @@ export const ar: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ الجلسة النشطة مرتبطة بمشروع مختلف، لذلك تمت إعادة ضبطها. استخدم /sessions لاختيار جلسة أو /new لبدء جلسة جديدة.",
   "bot.prompt_send_error": "تعذر إرسال الطلب إلى OpenCode.",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 أعاد OpenCode الخطأ التالي: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
@@ -177,6 +182,8 @@ export const ar: I18nDictionary = {
   "settings.prompt_queue.label": "قائمة انتظار الرسائل",
   "settings.value.on": "مفعّل",
   "settings.value.off": "معطّل",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ تم حفظ الإعداد.",
 
   "projects.empty":
@@ -297,6 +304,10 @@ export const ar: I18nDictionary = {
   "opencode_stop.still_running": "لا يزال الخادم يستجيب بعد طلب الإيقاف.",
   "opencode_stop.success": "✅ تم إيقاف خادم OpenCode بنجاح",
   "opencode_stop.error": "🔴 حدث خطأ أثناء إيقاف الخادم.\n\nراجع سجلات التطبيق للتفاصيل.",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ تم تغيير الوكيل إلى: {name}",
   "agent.change_error_callback": "تعذر تغيير الوكيل",
@@ -367,7 +378,6 @@ export const ar: I18nDictionary = {
   "permission.reply.once": "تم السماح لمرة واحدة",
   "permission.reply.always": "تم السماح دائمًا",
   "permission.reply.reject": "تم الرفض",
-  "permission.send_reply_error": "❌ تعذر إرسال رد الصلاحية",
   "permission.blocked.expected_reply": "⚠️ أجب عن طلب الصلاحية أولًا باستخدام الأزرار أعلاه.",
   "permission.blocked.command_not_allowed":
     "⚠️ لا يمكن استخدام هذا الأمر قبل الرد على طلب الصلاحية.",
@@ -376,6 +386,13 @@ export const ar: I18nDictionary = {
   "permission.button.allow": "✅ سماح لمرة واحدة",
   "permission.button.always": "🔓 سماح دائم",
   "permission.button.reject": "❌ رفض",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "تشغيل أمر Bash",
   "permission.name.edit": "تعديل ملف",
   "permission.name.write": "إنشاء أو كتابة ملف",
@@ -394,11 +411,11 @@ export const ar: I18nDictionary = {
   "question.select_one_required_callback": "اختر خيارًا واحدًا على الأقل",
   "question.enter_custom_callback": "أرسل إجابتك المخصصة كرسالة",
   "question.cancelled": "❌ تم إلغاء الاستبيان",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "تم استلام الإجابة بالفعل، يرجى الانتظار...",
   "question.completed_no_answers": "✅ اكتمل الاستبيان (بدون إجابات)",
-  "question.no_active_project": "❌ لا يوجد مشروع نشط",
-  "question.no_active_request": "❌ لا يوجد طلب نشط",
-  "question.send_answers_error": "❌ تعذر إرسال الإجابات إلى الوكيل",
   "question.multi_hint": "\n(يمكنك اختيار عدة خيارات)",
   "question.button.submit": "✅ تم",
   "question.button.custom": "🔤 إجابة مخصصة",
@@ -420,6 +437,7 @@ export const ar: I18nDictionary = {
   "queue.media_limit": "⚠️ الوسائط في قائمة الانتظار محدودة بـ {maxSizeMb} MiB. انتظر إرسال عنصر ثم أعد المحاولة.",
   "queue.removed": "🗑 تمت إزالة الرسالة من قائمة الانتظار.",
   "queue.not_found": "لم تعد هذه الرسالة في قائمة الانتظار.",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "يمكن تفعيل قائمة انتظار الرسائل من /settings.",
   "keyboard.updated": "⌨️ تم تحديث لوحة التحكم",
 
@@ -437,9 +455,12 @@ export const ar: I18nDictionary = {
   "subagent.line.status": "الحالة: {status}",
   "subagent.line.task": "المهمة: {task}",
   "subagent.line.agent": "الوكيل: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "جارٍ العمل...",
   "subagent.working_with_details": "جارٍ العمل: {details}",
   "subagent.completed": "مكتملة",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "فشلت المهمة",
   "subagent.status.pending": "قيد الانتظار",
   "subagent.status.running": "قيد التشغيل",
@@ -472,6 +493,15 @@ export const ar: I18nDictionary = {
     "أدخل اسم مستخدم خادم OpenCode (اختياري).\nاضغط Enter لاستخدام القيمة الافتراضية: {defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "أدخل كلمة مرور خادم OpenCode (اختياري).\nاضغط Enter لتركها فارغة.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid":
     "أدخل رابطًا صالحًا (http/https) أو اضغط Enter لاستخدام الافتراضي.\n",
   "runtime.wizard.start": "إعداد OpenCode Telegram Bot.\n",
@@ -525,6 +555,7 @@ export const ar: I18nDictionary = {
   "task.kind.once": "لمرة واحدة",
   "task.run.success": "⏰ اكتملت المهمة المجدولة: {description}",
   "task.run.error": "🔴 فشلت المهمة المجدولة: {description}\n\nالخطأ: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question":
     "طلبت المهمة المجدولة سؤالًا تفاعليًا ولا يمكنها المتابعة دون تدخل المستخدم.",
   "task.run.error.interactive_permission":

@@ -662,6 +662,119 @@ describe("bot/streaming/tool-call-streamer", () => {
     expect(sendText).toHaveBeenNthCalledWith(2, "s1", "after break");
   });
 
+  describe("pinned entries", () => {
+    function createStreamer() {
+      let id = 1;
+      const sendText = vi.fn(async (_sessionId: string, _text: string) => id++);
+      const editText = vi.fn(
+        async (_sessionId: string, _messageId: number, _text: string) => undefined,
+      );
+      const streamer = new ToolCallStreamer({
+        throttleMs: 0,
+        sendText,
+        editText,
+        deleteText: vi.fn().mockResolvedValue(undefined),
+      });
+      return { streamer, sendText, editText };
+    }
+
+    it("keeps editing a pinned line in its own message after the turn ends", async () => {
+      vi.useFakeTimers();
+      const { streamer, sendText, editText } = createStreamer();
+
+      streamer.replaceByPrefix("s1", "⏳bg", "⏳ 💻 bash sleep 90");
+      streamer.pinEntry("s1", "⏳bg");
+      await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+      await streamer.breakSession("s1", "session_idle");
+
+      streamer.replaceByPrefix("s1", "⏳bg", "⏳ 💻 bash sleep 90 · 🕒 30s");
+      await vi.waitFor(() => expect(editText).toHaveBeenCalledTimes(1));
+      streamer.replaceByPrefix("s1", "⏳bg", "💻 bash sleep 90 · 🕒 1m 30s");
+      await vi.waitFor(() => expect(editText).toHaveBeenCalledTimes(2));
+
+      expect(editText).toHaveBeenLastCalledWith("s1", 1, "💻 bash sleep 90 · 🕒 1m 30s");
+      expect(sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it("opens a new message for output that comes after the break", async () => {
+      vi.useFakeTimers();
+      const { streamer, sendText } = createStreamer();
+
+      streamer.replaceByPrefix("s1", "⏳bg", "⏳ bg");
+      streamer.pinEntry("s1", "⏳bg");
+      await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+      await streamer.breakSession("s1", "assistant_message_completed");
+
+      streamer.replaceByPrefix("s1", "⏳next", "⏳ next");
+      await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(2));
+      expect(sendText).toHaveBeenLastCalledWith("s1", "⏳ next");
+    });
+
+    it("lets go of the message at the next break once the line is unpinned", async () => {
+      vi.useFakeTimers();
+      const { streamer, sendText, editText } = createStreamer();
+
+      streamer.replaceByPrefix("s1", "⏳bg", "⏳ bg");
+      streamer.pinEntry("s1", "⏳bg");
+      await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+      await streamer.breakSession("s1", "session_idle");
+      streamer.replaceByPrefix("s1", "⏳bg", "bg done");
+      streamer.unpinEntry("s1", "⏳bg");
+      await vi.waitFor(() => expect(editText).toHaveBeenCalledTimes(1));
+      await streamer.breakSession("s1", "session_idle");
+
+      streamer.replaceByPrefix("s1", "⏳bg", "bg changed again");
+      await vi.advanceTimersByTimeAsync(500);
+      expect(sendText).toHaveBeenCalledTimes(2);
+      expect(sendText).toHaveBeenLastCalledWith("s1", "bg changed again");
+    });
+
+    it("ignores later updates of a pinned line once it is frozen", async () => {
+      vi.useFakeTimers();
+      const { streamer, sendText, editText } = createStreamer();
+
+      streamer.replaceByPrefix("s1", "⏳bg", "⏳ bg · 🕒 30s");
+      streamer.pinEntry("s1", "⏳bg");
+      await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+      await streamer.breakSession("s1", "session_idle");
+      streamer.freezePinnedEntries("s1");
+
+      streamer.replaceByPrefix("s1", "⏳bg", "bg · 🕒 1m 30s");
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(editText).not.toHaveBeenCalled();
+      expect(sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it("freezes either the pinned subagent cards or the other pinned lines", async () => {
+      vi.useFakeTimers();
+      const { streamer, editText } = createStreamer();
+
+      streamer.replaceByPrefix("s1", "⏳bg", "⏳ bg");
+      streamer.pinEntry("s1", "⏳bg");
+      streamer.replaceByPrefix("s1", "🧩", "🧩 card running", "subagent:card-1");
+      streamer.pinEntry("s1", "🧩", "subagent:card-1");
+      await vi.advanceTimersByTimeAsync(500);
+      await streamer.breakSession("s1", "session_idle");
+
+      streamer.freezePinnedEntries("s1", false);
+      streamer.replaceByPrefix("s1", "⏳bg", "bg done");
+      streamer.replaceByPrefix("s1", "🧩", "🧩 card ended", "subagent:card-1");
+      await vi.advanceTimersByTimeAsync(500);
+
+      const edits = editText.mock.calls.map((call) => String(call[2]));
+      expect(edits).toContain("🧩 card ended");
+      expect(edits).not.toContain("bg done");
+
+      streamer.freezePinnedEntries("s1", true);
+      streamer.replaceByPrefix("s1", "🧩", "🧩 card changed again", "subagent:card-1");
+      await vi.advanceTimersByTimeAsync(500);
+      expect(editText.mock.calls.map((call) => String(call[2]))).not.toContain(
+        "🧩 card changed again",
+      );
+    });
+  });
+
   it("reads throttleMs again for the next flush cycle", async () => {
     vi.useFakeTimers();
 
@@ -689,5 +802,118 @@ describe("bot/streaming/tool-call-streamer", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(editText).toHaveBeenCalledTimes(1);
     expect(editText).toHaveBeenCalledWith("s1", 1, "first\n\nsecond");
+  });
+
+  describe("gate", () => {
+    it("waits for its gate before opening a new message, not before editing it", async () => {
+      vi.useFakeTimers();
+      const sendText = vi.fn().mockResolvedValue(10);
+      const editText = vi.fn().mockResolvedValue(undefined);
+      let openGate: () => void = () => {};
+      const gate = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            openGate = resolve;
+          }),
+      );
+      const streamer = new ToolCallStreamer({
+        throttleMs: 100,
+        sendText,
+        editText,
+        deleteText: vi.fn().mockResolvedValue(undefined),
+        takeGate: () => gate,
+      });
+
+      streamer.append("s1", "first");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(gate).toHaveBeenCalledTimes(1);
+      expect(sendText).not.toHaveBeenCalled();
+
+      openGate();
+      await vi.waitFor(() => {
+        expect(sendText).toHaveBeenCalledWith("s1", "first");
+      });
+
+      gate.mockImplementation(() => new Promise<void>(() => {}));
+      streamer.append("s1", "second");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(editText).toHaveBeenCalledWith("s1", 10, "first\n\nsecond");
+      expect(gate).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not wait for its gate while the stream is broken", async () => {
+      vi.useFakeTimers();
+      const sendText = vi.fn().mockResolvedValue(10);
+      const gate = vi.fn(() => new Promise<void>(() => {}));
+      const streamer = new ToolCallStreamer({
+        throttleMs: 100,
+        sendText,
+        editText: vi.fn().mockResolvedValue(undefined),
+        deleteText: vi.fn().mockResolvedValue(undefined),
+        takeGate: () => gate,
+      });
+
+      streamer.append("s1", "line");
+      await streamer.breakSession("s1", "test_break");
+
+      expect(gate).not.toHaveBeenCalled();
+      expect(sendText).toHaveBeenCalledWith("s1", "line");
+    });
+
+    it("takes the gate when a stream starts", async () => {
+      vi.useFakeTimers();
+      const takeGate = vi.fn().mockReturnValue(undefined);
+      const streamer = new ToolCallStreamer({
+        throttleMs: 100,
+        sendText: vi.fn().mockResolvedValue(10),
+        editText: vi.fn().mockResolvedValue(undefined),
+        deleteText: vi.fn().mockResolvedValue(undefined),
+        takeGate,
+      });
+
+      streamer.append("s1", "first");
+      streamer.append("s1", "second");
+      expect(takeGate).toHaveBeenCalledTimes(1);
+      expect(streamer.hasUnsentMessages("s1")).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(streamer.hasUnsentMessages("s1")).toBe(false);
+    });
+
+    it("stops every stream of a session taking lines as soon as a break starts", async () => {
+      vi.useFakeTimers();
+      let releaseFirst: () => void = () => {};
+      const sendText = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<number>((resolve) => {
+              releaseFirst = () => resolve(10);
+            }),
+        )
+        .mockResolvedValue(11);
+      const streamer = new ToolCallStreamer({
+        throttleMs: 100,
+        sendText,
+        editText: vi.fn().mockResolvedValue(undefined),
+        deleteText: vi.fn().mockResolvedValue(undefined),
+      });
+
+      streamer.append("s1", "default line");
+      streamer.append("s1", "todo line", "todo");
+      const broken = streamer.breakSession("s1", "test_break");
+      streamer.append("s1", "later todo line", "todo");
+      await vi.waitFor(() => {
+        expect(sendText).toHaveBeenCalledTimes(1);
+      });
+      releaseFirst();
+      await vi.advanceTimersByTimeAsync(1000);
+      await broken;
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const sentTexts = sendText.mock.calls.map((call) => call[1]);
+      expect(sentTexts).toContain("todo line");
+      expect(sentTexts).toContain("later todo line");
+    });
   });
 });

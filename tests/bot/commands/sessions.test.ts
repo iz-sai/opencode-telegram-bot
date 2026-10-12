@@ -19,6 +19,7 @@ const mocked = vi.hoisted(() => ({
     worktree: "/repo",
   } as { id: string; worktree: string; name?: string } | null,
   sessionListMock: vi.fn(),
+  fileListMock: vi.fn(),
   sessionGetMock: vi.fn(),
   sessionMessagesMock: vi.fn(),
   sessionStatusMock: vi.fn(),
@@ -31,6 +32,8 @@ const mocked = vi.hoisted(() => ({
   keyboardUpdateModelMock: vi.fn(),
   keyboardUpdateContextMock: vi.fn(),
   applySessionSettingsMock: vi.fn(),
+  pinnedGetStateMock: vi.fn(),
+  pinnedOnModelChangeMock: vi.fn(),
   getStoredModelMock: vi.fn(() => ({
     providerID: "opencode-go",
     modelID: "deepseek-v4-flash",
@@ -43,6 +46,8 @@ const mocked = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/opencode/client.js", () => ({
+  opencodeServerVersion: "v2",
+  opencodeV2Client: { file: { list: mocked.fileListMock } },
   opencodeClient: {
     session: {
       list: mocked.sessionListMock,
@@ -185,6 +190,10 @@ function createDeps() {
       updateModel: mocked.keyboardUpdateModelMock,
       updateContext: mocked.keyboardUpdateContextMock,
     } as never,
+    pinnedMessageManager: {
+      getState: mocked.pinnedGetStateMock,
+      onModelChange: mocked.pinnedOnModelChangeMock,
+    } as never,
     bot: { api: {} } as Bot<Context>,
   };
 }
@@ -212,6 +221,7 @@ describe("bot/commands/sessions", () => {
     };
 
     mocked.sessionListMock.mockReset();
+    mocked.fileListMock.mockReset().mockResolvedValue({ data: [], error: undefined });
     mocked.sessionGetMock.mockReset();
     mocked.sessionMessagesMock.mockReset();
     mocked.sessionMessagesMock.mockResolvedValue({ data: [], error: null });
@@ -229,6 +239,11 @@ describe("bot/commands/sessions", () => {
     mocked.keyboardUpdateModelMock.mockReset();
     mocked.keyboardUpdateContextMock.mockReset();
     mocked.applySessionSettingsMock.mockReset();
+    mocked.applySessionSettingsMock.mockResolvedValue(false);
+    mocked.pinnedGetStateMock.mockReset();
+    mocked.pinnedGetStateMock.mockReturnValue({ sessionId: null, messageId: null });
+    mocked.pinnedOnModelChangeMock.mockReset();
+    mocked.pinnedOnModelChangeMock.mockResolvedValue(undefined);
     mocked.resolveProjectAgentMock.mockReset();
     mocked.resolveProjectAgentMock.mockResolvedValue("build");
     mocked.attachToSessionMock.mockReset();
@@ -260,6 +275,78 @@ describe("bot/commands/sessions", () => {
     expect(keyboardRows[9]?.[0]?.callback_data).toBe("session:session-10");
     expect(keyboardRows[10]?.[0]?.callback_data).toBe("session:page:1");
     expect(keyboardRows[11]?.[0]?.callback_data).toBe("inline:cancel:session");
+  });
+
+  it("leaves out sessions whose folder is gone without letting them take places on the page", async () => {
+    const sessions = Array.from({ length: 13 }, (_, index) => ({
+      ...createSession(index),
+      directory: index < 2 ? "/gone" : "/repo",
+    }));
+    mocked.sessionListMock.mockImplementation(async ({ limit }: { limit: number }) => ({
+      data: sessions.slice(0, limit),
+      error: null,
+    }));
+    mocked.fileListMock.mockImplementation(async ({ path }: { path: string }) =>
+      path === "/gone"
+        ? {
+            data: undefined,
+            error: Object.assign(new Error("500"), {
+              name: "ClientError",
+              reason: "UnexpectedStatus",
+              cause: { status: 500 },
+            }),
+          }
+        : { data: path === "/" ? ["repo/"] : [], error: undefined },
+    );
+
+    const ctx = createCommandContext();
+    await sessionsCommand(ctx as never, createDeps());
+
+    const keyboardRows = getKeyboardButtons(ctx);
+    expect(keyboardRows[0]?.[0]?.callback_data).toBe("session:session-3");
+    expect(keyboardRows[9]?.[0]?.callback_data).toBe("session:session-12");
+    expect(keyboardRows[10]?.[0]?.callback_data).toBe("session:page:1");
+  });
+
+  it("lists a session OpenCode has not named yet as a new session", async () => {
+    mocked.sessionListMock.mockResolvedValueOnce({
+      data: [{ ...createSession(0), title: "" }],
+      error: null,
+    });
+
+    const ctx = createCommandContext();
+    await sessionsCommand(ctx as never, createDeps());
+
+    const label = getKeyboardButtons(ctx)[0]?.[0]?.text;
+    expect(label).toMatch(new RegExp(`^1\\. ${t("pinned.default_session_title")} \\(`));
+  });
+
+  it("confirms the selection of an unnamed session as a new session and keeps its title empty", async () => {
+    mocked.sessionGetMock.mockResolvedValueOnce({
+      data: { ...createSession(0), title: "" },
+      error: null,
+    });
+
+    startInteractionForTest(container.interactionManager, {
+      kind: "inline",
+      expectedInput: "callback",
+      metadata: {
+        menuKind: "session",
+        messageId: 456,
+      },
+    });
+
+    const ctx = createCallbackContext("session:session-1", 456);
+    await handleSessionSelect(ctx, createDeps());
+
+    expect(mocked.attachToSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: { id: "session-1", title: "", directory: "/repo" },
+      }),
+    );
+    expect((ctx.api.sendMessage as ReturnType<typeof vi.fn>).mock.calls[1]?.[1]).toBe(
+      t("sessions.selected", { title: t("pinned.default_session_title") }),
+    );
   });
 
   it("blocks sessions command while foreground session is busy", async () => {
@@ -628,6 +715,48 @@ describe("bot/commands/sessions", () => {
     expect(defined(mocked.keyboardUpdateModelMock.mock.invocationCallOrder[0])).toBeLessThan(
       defined(mocked.keyboardGetKeyboardMock.mock.invocationCallOrder[0]),
     );
+  });
+
+  describe("redrawing the dashboard after the pull", () => {
+    async function selectSessionOne(): Promise<void> {
+      mocked.sessionGetMock.mockResolvedValueOnce({ data: createSession(0), error: null });
+      startInteractionForTest(container.interactionManager, {
+        kind: "inline",
+        expectedInput: "callback",
+        metadata: { menuKind: "session", messageId: 456 },
+      });
+
+      await handleSessionSelect(createCallbackContext("session:session-1", 456), createDeps());
+    }
+
+    it("redraws the dashboard of the re-selected session when the pull changed the model", async () => {
+      mocked.pinnedGetStateMock.mockReturnValue({ sessionId: "session-1", messageId: 999 });
+      mocked.applySessionSettingsMock.mockResolvedValue(true);
+
+      await selectSessionOne();
+
+      expect(mocked.pinnedOnModelChangeMock).toHaveBeenCalledOnce();
+      expect(defined(mocked.attachToSessionMock.mock.invocationCallOrder[0])).toBeLessThan(
+        defined(mocked.pinnedOnModelChangeMock.mock.invocationCallOrder[0]),
+      );
+    });
+
+    it("leaves the dashboard of the re-selected session alone when the model did not change", async () => {
+      mocked.pinnedGetStateMock.mockReturnValue({ sessionId: "session-1", messageId: 999 });
+
+      await selectSessionOne();
+
+      expect(mocked.pinnedOnModelChangeMock).not.toHaveBeenCalled();
+    });
+
+    it("leaves a switch to another session to the attach", async () => {
+      mocked.pinnedGetStateMock.mockReturnValue({ sessionId: "session-other", messageId: 999 });
+      mocked.applySessionSettingsMock.mockResolvedValue(true);
+
+      await selectSessionOne();
+
+      expect(mocked.pinnedOnModelChangeMock).not.toHaveBeenCalled();
+    });
   });
 
   it("pulls the settings when a background session notification is opened", async () => {

@@ -24,6 +24,7 @@ export const en = {
   "cmd.description.mcps": "MCP servers",
   "cmd.description.opencode_start": "Start OpenCode server",
   "cmd.description.opencode_stop": "Stop OpenCode server",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "List directory contents",
   "cmd.description.help": "Help",
 
@@ -92,6 +93,10 @@ export const en = {
   "bot.session_reset_project_mismatch":
     "⚠️ Active session does not match the selected project, so it was reset. Use /sessions to pick one or /new to create a new session.",
   "bot.prompt_send_error": "Failed to send request to OpenCode.",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 OpenCode returned an error: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
@@ -175,6 +180,8 @@ export const en = {
   "settings.prompt_queue.label": "Message queue",
   "settings.value.on": "On",
   "settings.value.off": "Off",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ Setting saved.",
 
   "projects.empty":
@@ -304,6 +311,10 @@ export const en = {
   "opencode_stop.success": "✅ OpenCode Server stopped successfully",
   "opencode_stop.error":
     "🔴 An error occurred while stopping server.\n\nCheck application logs for details.",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ Agent changed to: {name}",
   "agent.change_error_callback": "Failed to change agent",
@@ -376,7 +387,6 @@ export const en = {
   "permission.reply.once": "Allowed once",
   "permission.reply.always": "Always allowed",
   "permission.reply.reject": "Rejected",
-  "permission.send_reply_error": "❌ Failed to send permission reply",
   "permission.blocked.expected_reply":
     "⚠️ Please answer the permission request first using the buttons above.",
   "permission.blocked.command_not_allowed":
@@ -386,6 +396,13 @@ export const en = {
   "permission.button.allow": "✅ Allow once",
   "permission.button.always": "🔓 Allow always",
   "permission.button.reject": "❌ Reject",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Edit",
   "permission.name.write": "Write",
@@ -404,11 +421,11 @@ export const en = {
   "question.select_one_required_callback": "Select at least one option",
   "question.enter_custom_callback": "Send your custom answer as a message",
   "question.cancelled": "❌ Poll cancelled",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "Answer already received, please wait...",
   "question.completed_no_answers": "✅ Poll completed (no answers)",
-  "question.no_active_project": "❌ No active project",
-  "question.no_active_request": "❌ No active request",
-  "question.send_answers_error": "❌ Failed to send answers to agent",
   "question.multi_hint": "\n(You can select multiple options)",
   "question.button.submit": "✅ Done",
   "question.button.custom": "🔤 Custom answer",
@@ -430,6 +447,7 @@ export const en = {
   "queue.media_limit": "⚠️ Queued media is limited to {maxSizeMb} MiB. Wait for an item to send, then try again.",
   "queue.removed": "🗑 Message removed from the queue.",
   "queue.not_found": "This message is no longer in the queue.",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "The message queue can be enabled in /settings.",
   "keyboard.updated": "⌨️ Keyboard updated",
 
@@ -447,9 +465,12 @@ export const en = {
   "subagent.line.status": "Status: {status}",
   "subagent.line.task": "Task: {task}",
   "subagent.line.agent": "Agent: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "Working...",
   "subagent.working_with_details": "Working: {details}",
   "subagent.completed": "Completed",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "Task failed",
   "subagent.status.pending": "pending",
   "subagent.status.running": "running",
@@ -483,6 +504,15 @@ export const en = {
     "Enter OpenCode server username (optional).\nPress Enter to use default: {defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "Enter OpenCode server password (optional).\nPress Enter to keep it empty.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid": "Enter a valid URL (http/https) or press Enter for default.\n",
   "runtime.wizard.start": "OpenCode Telegram Bot setup.\n",
   "runtime.wizard.saved": "Configuration saved:\n- {envPath}\n",
@@ -537,6 +567,7 @@ export const en = {
   "task.kind.once": "one-time",
   "task.run.success": "⏰ Scheduled task completed: {description}",
   "task.run.error": "🔴 Scheduled task failed: {description}\n\nError: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question":
     "Scheduled task requested an interactive question and cannot continue unattended.",
   "task.run.error.interactive_permission":

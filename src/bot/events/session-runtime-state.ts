@@ -1,4 +1,8 @@
-import type { SubagentInfo, ToolInfo } from "../../app/managers/summary-aggregation-manager.js";
+import {
+  outlivesParentTurn,
+  type SubagentInfo,
+  type ToolInfo,
+} from "../../app/managers/summary-aggregation-manager.js";
 import { TOOL_ELAPSED_THRESHOLD_MS } from "../../app/formatters/duration-formatter.js";
 import { ToolMessageBatcher } from "../../app/formatters/tool-message-batcher.js";
 import { logger } from "../../utils/logger.js";
@@ -42,9 +46,19 @@ export interface CompactActivity {
   activity: string;
 }
 
+/** What output that began after a reply's text waits for before it opens a new message. */
+export type ReplyGate = () => Promise<void>;
+
 interface RunningToolHooks {
   onTick: (tick: RunningToolTick) => void;
   onHeartbeat: (sessionId: string) => void;
+}
+
+function isRunningBackgroundSubagent(subagent: SubagentInfo): boolean {
+  return Boolean(
+    outlivesParentTurn(subagent) &&
+      (subagent.status === "pending" || subagent.status === "running"),
+  );
 }
 
 function sessionKey(sessionId: string, id: string): string {
@@ -84,6 +98,16 @@ export class SessionRuntimeState {
   private readonly assistantLatestTexts = new Map<string, string>();
   private readonly assistantDeliveredTexts = new Map<string, string>();
   private readonly assistantCompletionsStarted = new Set<string>();
+  // `edit` replies whose text has begun: output that starts after it goes below the reply.
+  private readonly begunReplies = new Set<string>();
+  // Per session: settling the output that came before the latest reply's text, and the
+  // compact-mode wait before a reply's first partial reaches its stream.
+  private readonly replyCuts = new Map<string, Promise<void>>();
+  private readonly replyEnqueueDeferrals = new Map<string, Promise<void>>();
+  // Compact mode: the reply whose card still has to close before the next activity, and
+  // the replies whose card was already closed that way.
+  private readonly compactCloseDue = new Map<string, string>();
+  private readonly compactClosedReplies = new Set<string>();
   private readonly thinkingSections = new Map<string, ThinkingSection[]>();
   private readonly completionTasks = new Map<string, Promise<void>>();
   private readonly runningToolInfos = new Map<string, ToolInfo>();
@@ -103,6 +127,7 @@ export class SessionRuntimeState {
     });
 
     this.toolMessageBatcher = new ToolMessageBatcher({
+      takeTextGate: (sessionId) => this.takeReplyGate(sessionId),
       sendText: async (sessionId, text) => {
         const destination = this.getForegroundDestination(sessionId);
         if (!destination) {
@@ -157,10 +182,19 @@ export class SessionRuntimeState {
           this.requireForegroundDestination(sessionId, "Compact progress", "delete"),
           messageId,
         ),
+      // A parked card keeps its background operations; the next stretch no longer runs them.
+      onPark: (sessionId, callIds) => {
+        this.runningToolTracker.detach(callIds);
+        const cached = this.compactActivityBySession.get(sessionId);
+        if (cached && callIds.includes(cached.callId)) {
+          this.compactActivityBySession.delete(sessionId);
+        }
+      },
     });
 
     this.toolCallStreamer = new ToolCallStreamer({
       throttleMs: getSessionStreamThrottleMs,
+      takeGate: (sessionId) => this.takeReplyGate(sessionId),
       sendText: (sessionId, text) =>
         this.delivery.sendText(
           this.requireForegroundDestination(sessionId, "Tool stream", "send"),
@@ -317,11 +351,20 @@ export class SessionRuntimeState {
     deleteSessionKeys(this.assistantStreamModes, sessionId);
     deleteSessionKeys(this.assistantLatestTexts, sessionId);
     deleteSessionKeys(this.assistantDeliveredTexts, sessionId);
-    for (const key of Array.from(this.assistantCompletionsStarted)) {
-      if (key.startsWith(`${sessionId}:`)) {
-        this.assistantCompletionsStarted.delete(key);
+    for (const keys of [
+      this.assistantCompletionsStarted,
+      this.begunReplies,
+      this.compactClosedReplies,
+    ]) {
+      for (const key of Array.from(keys)) {
+        if (key.startsWith(`${sessionId}:`)) {
+          keys.delete(key);
+        }
       }
     }
+    this.replyCuts.delete(sessionId);
+    this.replyEnqueueDeferrals.delete(sessionId);
+    this.compactCloseDue.delete(sessionId);
     this.assistantEditStreamer.clearSession(sessionId, reason);
     this.assistantDraftStreamer.clearSession(sessionId, reason);
   }
@@ -331,6 +374,112 @@ export class SessionRuntimeState {
       this.assistantEditStreamer.hasActiveStream(sessionId) ||
       this.assistantDraftStreamer.hasActiveStream(sessionId)
     );
+  }
+
+  // --- order of a reply and what follows it ---
+
+  isReplyBegun(sessionId: string, messageId: string): boolean {
+    return this.begunReplies.has(sessionKey(sessionId, messageId));
+  }
+
+  markReplyBegun(sessionId: string, messageId: string): void {
+    this.begunReplies.add(sessionKey(sessionId, messageId));
+  }
+
+  /**
+   * Settles the output that came before a reply's text where it is: queued tool
+   * messages finish, and the tool stream breaks so later tools open a new message.
+   */
+  startReplyCut(sessionId: string): void {
+    const previousCut = this.replyCuts.get(sessionId);
+    const cut = Promise.all([
+      previousCut,
+      this.toolMessageBatcher.flushSession(sessionId, "assistant_reply_started"),
+      this.toolCallStreamer.breakSession(sessionId, "assistant_reply_started"),
+    ])
+      .then(() => undefined)
+      .catch((error) => {
+        logger.error(`[Bot] Failed to settle output before a reply: session=${sessionId}`, error);
+      });
+    this.replyCuts.set(sessionId, cut);
+    void cut.finally(() => {
+      if (this.replyCuts.get(sessionId) === cut) {
+        this.replyCuts.delete(sessionId);
+      }
+    });
+  }
+
+  setReplyEnqueueDeferral(sessionId: string, deferral: Promise<void>): void {
+    this.replyEnqueueDeferrals.set(sessionId, deferral);
+    void deferral.finally(() => {
+      if (this.replyEnqueueDeferrals.get(sessionId) === deferral) {
+        this.replyEnqueueDeferrals.delete(sessionId);
+      }
+    });
+  }
+
+  /**
+   * Taken when output enters its queue: letting it out sends the replies begun by
+   * then that are not on screen yet, after the output that came before them.
+   */
+  takeReplyGate(sessionId: string): ReplyGate | undefined {
+    const sessionPrefix = `${sessionId}:`;
+    const messageIds = Array.from(this.begunReplies)
+      .filter((key) => key.startsWith(sessionPrefix))
+      .map((key) => key.slice(sessionPrefix.length));
+    if (messageIds.length === 0) {
+      return undefined;
+    }
+
+    const deferral = this.replyEnqueueDeferrals.get(sessionId);
+    const cut = this.replyCuts.get(sessionId);
+    return async () => {
+      await deferral?.catch(() => undefined);
+      await cut;
+      for (const messageId of messageIds) {
+        await this.assistantEditStreamer.flushPending(sessionId, messageId);
+      }
+    };
+  }
+
+  async letOutReplies(sessionId: string): Promise<void> {
+    await this.takeReplyGate(sessionId)?.();
+  }
+
+  /**
+   * A document opens its boundary only once no cut it has not waited for is running,
+   * so it never joins a boundary a cut is waiting on.
+   */
+  async letOutRepliesBeforeDocument(sessionId: string): Promise<void> {
+    let cut: Promise<void> | undefined;
+    do {
+      cut = this.replyCuts.get(sessionId);
+      await this.letOutReplies(sessionId);
+    } while (this.replyCuts.get(sessionId) !== cut);
+  }
+
+  markCompactCloseDue(sessionId: string, messageId: string): void {
+    this.compactCloseDue.set(sessionId, messageId);
+  }
+
+  /** Takes the reply whose card closes now, remembering it was closed that way. */
+  takeCompactCloseDue(sessionId: string): string | undefined {
+    const messageId = this.compactCloseDue.get(sessionId);
+    if (messageId === undefined) {
+      return undefined;
+    }
+
+    this.compactCloseDue.delete(sessionId);
+    this.compactClosedReplies.add(sessionKey(sessionId, messageId));
+    return messageId;
+  }
+
+  /** At a reply's completion: whether its card already closed, dropping its marks. */
+  takeCompactClosedForReply(sessionId: string, messageId: string): boolean {
+    if (this.compactCloseDue.get(sessionId) === messageId) {
+      this.compactCloseDue.delete(sessionId);
+    }
+    return this.compactClosedReplies.delete(sessionKey(sessionId, messageId));
   }
 
   // --- thinking ---
@@ -379,6 +528,12 @@ export class SessionRuntimeState {
     return this.runningToolInfos.get(sessionKey(sessionId, callId));
   }
 
+  getRunningToolInfos(sessionId: string): ToolInfo[] {
+    return Array.from(this.runningToolInfos.values()).filter(
+      (info) => info.sessionId === sessionId,
+    );
+  }
+
   setRunningToolInfo(toolInfo: ToolInfo): void {
     this.runningToolInfos.set(sessionKey(toolInfo.sessionId, toolInfo.callId), toolInfo);
   }
@@ -414,14 +569,85 @@ export class SessionRuntimeState {
     this.subagentSnapshots.set(sessionId, subagents);
   }
 
-  /** Stops tool timers and drops tool bookkeeping for one session. */
-  clearToolTracking(sessionId: string, reason: string): void {
-    this.runningToolTracker.clearSession(sessionId, reason);
-    this.runningToolTracker.setHeartbeatActive(sessionId, false);
+  /**
+   * Stops tool timers and drops tool bookkeeping for one session. A turn boundary of the
+   * foreground session passes `keepBackground`: background operations outlive the turn.
+   */
+  clearToolTracking(sessionId: string, reason: string, keepBackground = false): void {
+    const keptCallIds = new Set(
+      keepBackground ? this.runningToolTracker.backgroundCallIds(sessionId) : [],
+    );
+    this.runningToolTracker.clearSession(sessionId, reason, keepBackground);
     this.compactActivityBySession.delete(sessionId);
-    this.subagentSnapshots.delete(sessionId);
-    deleteSessionKeys(this.runningToolInfos, sessionId);
+    const keptSubagents = keepBackground
+      ? (this.subagentSnapshots.get(sessionId) ?? []).filter(isRunningBackgroundSubagent)
+      : [];
+    this.setKeptSubagents(sessionId, keptSubagents);
+    for (const key of Array.from(this.runningToolInfos.keys())) {
+      const callId = key.slice(sessionId.length + 1);
+      if (key.startsWith(`${sessionId}:`) && !keptCallIds.has(callId)) {
+        this.runningToolInfos.delete(key);
+      }
+    }
     deleteSessionKeys(this.completedToolDurations, sessionId);
+  }
+
+  /**
+   * Stops following background operations of one session, or of all: their lines and
+   * cards stay as they are and a later completion no longer changes them.
+   */
+  stopBackgroundOperations(reason: string, sessionId?: string): void {
+    this.stopBackgroundCommands(reason, sessionId);
+    this.stopBackgroundSubagents(sessionId);
+  }
+
+  /** The command half of `stopBackgroundOperations`: subagent cards keep being followed. */
+  stopBackgroundCommands(reason: string, sessionId?: string): void {
+    const callIds = this.runningToolTracker.backgroundCallIds(sessionId);
+    for (const callId of callIds) {
+      this.runningToolTracker.release(callId);
+    }
+    for (const [key, info] of Array.from(this.runningToolInfos)) {
+      if (callIds.includes(info.callId)) {
+        this.runningToolInfos.delete(key);
+      }
+    }
+
+    this.toolCallStreamer.freezePinnedEntries(sessionId, false);
+    this.compactProgressStreamer.dropBackgroundOperations(sessionId);
+
+    if (callIds.length > 0) {
+      logger.debug(
+        `[Bot] Stopped background operations: session=${sessionId ?? "all"}, count=${callIds.length}, reason=${reason}`,
+      );
+    }
+  }
+
+  /** The subagent-card half of `stopBackgroundOperations`. */
+  private stopBackgroundSubagents(sessionId?: string): void {
+    this.toolCallStreamer.freezePinnedEntries(sessionId, true);
+    for (const [snapshotSessionId, subagents] of Array.from(this.subagentSnapshots)) {
+      if (sessionId === undefined || snapshotSessionId === sessionId) {
+        this.setKeptSubagents(
+          snapshotSessionId,
+          subagents.filter((subagent) => !outlivesParentTurn(subagent)),
+        );
+      }
+    }
+  }
+
+  private setKeptSubagents(sessionId: string, subagents: SubagentInfo[]): void {
+    if (subagents.length === 0) {
+      this.subagentSnapshots.delete(sessionId);
+      this.runningToolTracker.setHeartbeatActive(sessionId, false);
+      return;
+    }
+
+    this.subagentSnapshots.set(sessionId, subagents);
+    this.runningToolTracker.setHeartbeatActive(
+      sessionId,
+      subagents.some((subagent) => subagent.status === "pending" || subagent.status === "running"),
+    );
   }
 
   // --- clearing ---
@@ -445,6 +671,11 @@ export class SessionRuntimeState {
     this.assistantStreamModes.clear();
     this.assistantLatestTexts.clear();
     this.assistantDeliveredTexts.clear();
+    this.begunReplies.clear();
+    this.replyCuts.clear();
+    this.replyEnqueueDeferrals.clear();
+    this.compactCloseDue.clear();
+    this.compactClosedReplies.clear();
     this.assistantEditStreamer.clearAll(reason);
     this.assistantDraftStreamer.clearAll(reason);
     this.thinkingStreamer.clearAll(reason);
@@ -469,6 +700,7 @@ export class SessionRuntimeState {
     this.assistantStreamModes.delete(key);
     this.assistantLatestTexts.delete(key);
     this.assistantDeliveredTexts.delete(key);
+    this.begunReplies.delete(key);
   }
 
   private getAssistantStreamer(mode: ResponseStreamingMode): ResponseStreamer {

@@ -11,6 +11,16 @@ export interface EventEnvelope {
 }
 
 export type EventCallback = (envelope: EventEnvelope) => void;
+/**
+ * What a reconnect tells about the server: `serverRestarted` is true when it is another
+ * process than before, false when it is the same one, null when that cannot be told (V1,
+ * or no answer).
+ */
+export interface ReconnectInfo {
+  serverRestarted: boolean | null;
+}
+/** Runs once the stream delivers again after it dropped, since missed events are not replayed. */
+export type ReconnectCallback = (info: ReconnectInfo) => void;
 type EventStreamSource = "global" | "legacy";
 type EventStreamSubscription = {
   source: EventStreamSource;
@@ -34,6 +44,7 @@ const SSE_IDLE_TIMEOUT_ERROR = "SSE stream idle timeout";
 
 let eventStream: AsyncGenerator<unknown, unknown, unknown> | null = null;
 let eventCallback: EventCallback | null = null;
+let reconnectCallback: ReconnectCallback | null = null;
 let isListening = false;
 let activeDirectory: string | null = null;
 let streamAbortController: AbortController | null = null;
@@ -184,6 +195,15 @@ function normalizeEvent(
   return { directory, event: rawEvent };
 }
 
+/** The V2 adapter marks the connect event with whether the server restarted. */
+function getReconnectInfo(event: Event): ReconnectInfo {
+  if (event.type !== "server.connected") {
+    return { serverRestarted: null };
+  }
+  const restarted = (event.properties as { restarted?: unknown }).restarted;
+  return { serverRestarted: typeof restarted === "boolean" ? restarted : null };
+}
+
 async function subscribeToGlobalEventStream(signal: AbortSignal): Promise<EventStreamSubscription> {
   const globalEvents = (opencodeClient as OptionalGlobalEventClient).global;
   if (!globalEvents?.event) {
@@ -211,9 +231,14 @@ async function subscribeToLegacyEventStream(
   return { source: "legacy", stream: result.stream };
 }
 
-export async function subscribeToEvents(directory: string, callback: EventCallback): Promise<void> {
+export async function subscribeToEvents(
+  directory: string,
+  callback: EventCallback,
+  onReconnect?: ReconnectCallback,
+): Promise<void> {
   if (isListening && activeDirectory === directory) {
     eventCallback = callback;
+    reconnectCallback = onReconnect ?? null;
     logger.debug(`Event listener already running for ${directory}`);
     return;
   }
@@ -231,12 +256,14 @@ export async function subscribeToEvents(directory: string, callback: EventCallba
 
   activeDirectory = directory;
   eventCallback = callback;
+  reconnectCallback = onReconnect ?? null;
   isListening = true;
   streamAbortController = controller;
 
   try {
     let reconnectAttempt = 0;
     let useLegacyEventsOnce = false;
+    let streamDropped = false;
 
     while (isListening && activeDirectory === directory && !controller.signal.aborted) {
       let attemptAbort: ReturnType<typeof createAttemptAbortController> | null = null;
@@ -271,6 +298,7 @@ export async function subscribeToEvents(directory: string, callback: EventCallba
         consecutiveTimeouts = 0;
         eventStream = subscription.stream;
         let usefulEventCount = 0;
+        let connectedSeen = false;
 
         try {
           while (isListening && activeDirectory === directory && !controller.signal.aborted) {
@@ -312,6 +340,31 @@ export async function subscribeToEvents(directory: string, callback: EventCallba
 
             if (normalizedEvent.event.type !== "server.connected") {
               usefulEventCount++;
+            } else if (connectedSeen) {
+              // The SDK's SSE client reconnected on its own: the loop never saw the drop.
+              logger.info(`Event stream reconnected by the client for ${directory}`);
+              streamDropped = true;
+            } else {
+              connectedSeen = true;
+            }
+
+            if (streamDropped) {
+              streamDropped = false;
+              const reconnectSnapshot = reconnectCallback;
+              const reconnectInfo = getReconnectInfo(normalizedEvent.event);
+              if (reconnectSnapshot) {
+                setImmediate(() => {
+                  if (streamAbortController !== controller || listenerGeneration !== generation) {
+                    return;
+                  }
+
+                  try {
+                    reconnectSnapshot(reconnectInfo);
+                  } catch (error) {
+                    logger.error("[Events] Reconnect callback failed:", error);
+                  }
+                });
+              }
             }
 
             if (eventCallback) {
@@ -357,6 +410,7 @@ export async function subscribeToEvents(directory: string, callback: EventCallba
 
         reconnectAttempt++;
         consecutiveTimeouts = 0;
+        streamDropped = true;
         const reconnectDelay = getReconnectDelayMs(reconnectAttempt);
         logger.warn(
           `Event stream ended for ${directory}, reconnecting in ${reconnectDelay}ms (attempt=${reconnectAttempt})`,
@@ -382,6 +436,7 @@ export async function subscribeToEvents(directory: string, callback: EventCallba
 
         reconnectAttempt++;
         consecutiveTimeouts++;
+        streamDropped = true;
         const reconnectDelay = getReconnectDelayMs(reconnectAttempt);
         if (isEventStreamIdleTimeoutError(error)) {
           const timeoutWarning =
@@ -432,6 +487,7 @@ export async function subscribeToEvents(directory: string, callback: EventCallba
       streamAbortController = null;
       eventStream = null;
       eventCallback = null;
+      reconnectCallback = null;
       isListening = false;
       activeDirectory = null;
     }
@@ -444,6 +500,7 @@ export function stopEventListening(): void {
   streamAbortController = null;
   isListening = false;
   eventCallback = null;
+  reconnectCallback = null;
   eventStream = null;
   activeDirectory = null;
   logger.info("Event listener stopped");

@@ -26,6 +26,7 @@ export const tr: I18nDictionary = {
   "cmd.description.mcps": "MCP sunucuları",
   "cmd.description.opencode_start": "OpenCode sunucusunu başlat",
   "cmd.description.opencode_stop": "OpenCode sunucusunu durdur",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "Dizin içeriğini listele",
   "cmd.description.help": "Yardım",
 
@@ -92,6 +93,10 @@ export const tr: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ Etkin oturum seçili projeyle eşleşmediği için sıfırlandı. Birini seçmek için /sessions veya yeni oturum oluşturmak için /new kullanın.",
   "bot.prompt_send_error": "İstek OpenCode'a gönderilemedi.",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 OpenCode bir hata döndürdü: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
@@ -178,6 +183,8 @@ export const tr: I18nDictionary = {
   "settings.prompt_queue.label": "Mesaj kuyruğu",
   "settings.value.on": "Açık",
   "settings.value.off": "Kapalı",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ Ayar kaydedildi.",
 
   "projects.empty":
@@ -304,6 +311,10 @@ export const tr: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode Sunucusu başarıyla durduruldu",
   "opencode_stop.error":
     "🔴 Sunucu durdurulurken bir hata oluştu.\n\nAyrıntılar için uygulama günlüklerini kontrol edin.",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ Ajan değiştirildi: {name}",
   "agent.change_error_callback": "Ajan değiştirilemedi",
@@ -376,7 +387,6 @@ export const tr: I18nDictionary = {
   "permission.reply.once": "Bir kez izin verildi",
   "permission.reply.always": "Her zaman izin verildi",
   "permission.reply.reject": "Reddedildi",
-  "permission.send_reply_error": "❌ İzin yanıtı gönderilemedi",
   "permission.blocked.expected_reply":
     "⚠️ Lütfen önce yukarıdaki düğmelerle izin isteğini yanıtlayın.",
   "permission.blocked.command_not_allowed":
@@ -386,6 +396,13 @@ export const tr: I18nDictionary = {
   "permission.button.allow": "✅ Bir kez izin ver",
   "permission.button.always": "🔓 Her zaman izin ver",
   "permission.button.reject": "❌ Reddet",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Düzenleme",
   "permission.name.write": "Yazma",
@@ -404,11 +421,11 @@ export const tr: I18nDictionary = {
   "question.select_one_required_callback": "En az bir seçenek seçin",
   "question.enter_custom_callback": "Özel yanıtınızı mesaj olarak gönderin",
   "question.cancelled": "❌ Anket iptal edildi",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "Yanıt zaten alındı, lütfen bekleyin...",
   "question.completed_no_answers": "✅ Anket tamamlandı (yanıt yok)",
-  "question.no_active_project": "❌ Etkin proje yok",
-  "question.no_active_request": "❌ Etkin istek yok",
-  "question.send_answers_error": "❌ Yanıtlar ajana gönderilemedi",
   "question.multi_hint": "\n(Birden fazla seçenek seçebilirsiniz)",
   "question.button.submit": "✅ Tamam",
   "question.button.custom": "🔤 Özel yanıt",
@@ -432,6 +449,7 @@ export const tr: I18nDictionary = {
     "⚠️ Kuyruktaki medya {maxSizeMb} MiB ile sınırlıdır. Bir öğenin gönderilmesini bekleyip tekrar deneyin.",
   "queue.removed": "🗑 Mesaj kuyruktan kaldırıldı.",
   "queue.not_found": "Bu mesaj artık kuyrukta değil.",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "Mesaj kuyruğu /settings içinden açılabilir.",
   "keyboard.updated": "⌨️ Klavye güncellendi",
 
@@ -449,9 +467,12 @@ export const tr: I18nDictionary = {
   "subagent.line.status": "Durum: {status}",
   "subagent.line.task": "Görev: {task}",
   "subagent.line.agent": "Ajan: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "Çalışıyor...",
   "subagent.working_with_details": "Çalışıyor: {details}",
   "subagent.completed": "Tamamlandı",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "Görev başarısız oldu",
   "subagent.status.pending": "bekliyor",
   "subagent.status.running": "çalışıyor",
@@ -485,6 +506,15 @@ export const tr: I18nDictionary = {
     "OpenCode sunucu kullanıcı adını girin (isteğe bağlı).\nVarsayılanı kullanmak için Enter'a basın: {defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "OpenCode sunucu parolasını girin (isteğe bağlı).\nBoş bırakmak için Enter'a basın.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid":
     "Geçerli bir URL (http/https) girin veya varsayılan için Enter'a basın.\n",
   "runtime.wizard.start": "OpenCode Telegram Bot kurulumu.\n",
@@ -541,6 +571,7 @@ export const tr: I18nDictionary = {
   "task.kind.once": "tek seferlik",
   "task.run.success": "⏰ Zamanlanmış görev tamamlandı: {description}",
   "task.run.error": "🔴 Zamanlanmış görev başarısız oldu: {description}\n\nHata: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question":
     "Zamanlanmış görev etkileşimli bir soru sordu ve gözetimsiz devam edemiyor.",
   "task.run.error.interactive_permission":

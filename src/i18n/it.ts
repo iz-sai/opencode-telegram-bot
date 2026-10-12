@@ -26,6 +26,7 @@ export const it: I18nDictionary = {
   "cmd.description.mcps": "Server MCP",
   "cmd.description.opencode_start": "Avvia il server OpenCode",
   "cmd.description.opencode_stop": "Ferma il server OpenCode",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "Elenca il contenuto della directory",
   "cmd.description.help": "Aiuto",
 
@@ -97,6 +98,10 @@ export const it: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ La sessione attiva non corrisponde al progetto selezionato, quindi è stata reimpostata. Usa /sessions per sceglierne una o /new per crearne una nuova.",
   "bot.prompt_send_error": "Invio della richiesta a OpenCode non riuscito.",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 OpenCode ha restituito un errore: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
@@ -188,6 +193,8 @@ export const it: I18nDictionary = {
   "settings.prompt_queue.label": "Coda messaggi",
   "settings.value.on": "On",
   "settings.value.off": "Off",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ Impostazione salvata.",
 
   "projects.empty":
@@ -318,6 +325,10 @@ export const it: I18nDictionary = {
   "opencode_stop.success": "✅ Server OpenCode arrestato correttamente",
   "opencode_stop.error":
     "🔴 Si è verificato un errore durante l'arresto del server.\n\nControlla i log dell'applicazione per i dettagli.",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ Agente modificato in: {name}",
   "agent.change_error_callback": "Modifica dell'agente non riuscita",
@@ -390,7 +401,6 @@ export const it: I18nDictionary = {
   "permission.reply.once": "Consentito una volta",
   "permission.reply.always": "Consentito sempre",
   "permission.reply.reject": "Rifiutato",
-  "permission.send_reply_error": "❌ Invio della risposta al permesso non riuscito",
   "permission.blocked.expected_reply":
     "⚠️ Rispondi prima alla richiesta di permesso usando i pulsanti qui sopra.",
   "permission.blocked.command_not_allowed":
@@ -401,6 +411,13 @@ export const it: I18nDictionary = {
   "permission.button.allow": "✅ Consenti una volta",
   "permission.button.always": "🔓 Consenti sempre",
   "permission.button.reject": "❌ Rifiuta",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Modifica",
   "permission.name.write": "Scrittura",
@@ -419,11 +436,11 @@ export const it: I18nDictionary = {
   "question.select_one_required_callback": "Seleziona almeno un'opzione",
   "question.enter_custom_callback": "Invia la tua risposta personalizzata come messaggio",
   "question.cancelled": "❌ Sondaggio annullato",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "Risposta già ricevuta, attendi...",
   "question.completed_no_answers": "✅ Sondaggio completato (nessuna risposta)",
-  "question.no_active_project": "❌ Nessun progetto attivo",
-  "question.no_active_request": "❌ Nessuna richiesta attiva",
-  "question.send_answers_error": "❌ Invio delle risposte all'agente non riuscito",
   "question.multi_hint": "\n(Puoi selezionare più opzioni)",
   "question.button.submit": "✅ Fine",
   "question.button.custom": "🔤 Risposta personalizzata",
@@ -445,6 +462,7 @@ export const it: I18nDictionary = {
   "queue.media_limit": "⚠️ I media in coda sono limitati a {maxSizeMb} MiB. Attendi l'invio di un elemento e riprova.",
   "queue.removed": "🗑 Messaggio rimosso dalla coda.",
   "queue.not_found": "Questo messaggio non è più in coda.",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "La coda dei messaggi può essere attivata in /settings.",
   "keyboard.updated": "⌨️ Tastiera aggiornata",
 
@@ -462,9 +480,12 @@ export const it: I18nDictionary = {
   "subagent.line.status": "Stato: {status}",
   "subagent.line.task": "Attività: {task}",
   "subagent.line.agent": "Agente: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "Al lavoro...",
   "subagent.working_with_details": "Al lavoro: {details}",
   "subagent.completed": "Completato",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "Attività non riuscita",
   "subagent.status.pending": "in attesa",
   "subagent.status.running": "in esecuzione",
@@ -498,6 +519,15 @@ export const it: I18nDictionary = {
     "Inserisci il nome utente del server OpenCode (facoltativo).\nPremi Invio per usare l'impostazione predefinita: {defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "Inserisci la password del server OpenCode (facoltativa).\nPremi Invio per lasciarla vuota.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid": "Inserisci un URL valido (http/https) o premi Invio per l'impostazione predefinita.\n",
   "runtime.wizard.start": "Configurazione di OpenCode Telegram Bot.\n",
   "runtime.wizard.saved": "Configurazione salvata:\n- {envPath}\n",
@@ -552,6 +582,7 @@ export const it: I18nDictionary = {
   "task.kind.once": "una tantum",
   "task.run.success": "⏰ Attività pianificata completata: {description}",
   "task.run.error": "🔴 Attività pianificata non riuscita: {description}\n\nErrore: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question":
     "L'attività pianificata ha richiesto una domanda interattiva e non può proseguire senza supervisione.",
   "task.run.error.interactive_permission":

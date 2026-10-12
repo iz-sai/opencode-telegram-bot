@@ -432,6 +432,174 @@ describe("summary/aggregator", () => {
     });
   });
 
+  describe("task call input reaches its own card", () => {
+    function createChild(id: string): void {
+      summaryAggregator.processEvent({
+        type: "session.created",
+        properties: {
+          info: {
+            id,
+            parentID: "root-session",
+            title: "",
+            slug: id,
+            directory: "D:/repo",
+            projectID: "p1",
+            version: "1",
+            time: { created: Date.now(), updated: Date.now() },
+          },
+        },
+      } as unknown as Event);
+    }
+
+    function emitTaskCall(
+      callID: string,
+      description: string,
+      fields: { status?: string; sessionId?: string } = {},
+    ): void {
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: `part-${callID}`,
+            sessionID: "root-session",
+            messageID: "root-message",
+            type: "tool",
+            callID,
+            tool: "task",
+            state: {
+              status: fields.status ?? "running",
+              input: { description, subagent_type: "explore", prompt: description },
+              metadata: fields.sessionId ? { sessionId: fields.sessionId } : {},
+              time: { start: Date.now() },
+            },
+          },
+        },
+      } as unknown as Event);
+    }
+
+    function endChild(id: string): void {
+      summaryAggregator.processEvent({
+        type: "session.idle",
+        properties: { sessionID: id },
+      } as unknown as Event);
+    }
+
+    function descriptions(onSubagent: ReturnType<typeof vi.fn>): Record<string, string> {
+      const cards = (onSubagent.mock.lastCall?.[1] ?? []) as Array<{
+        sessionId: string;
+        description: string;
+      }>;
+      return Object.fromEntries(cards.map((card) => [card.sessionId, card.description]));
+    }
+
+    it("gives a call's input to the card of the child session it names", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      summaryAggregator.setSession("root-session");
+      emitTaskCall("call-1", "first task");
+      emitTaskCall("call-2", "second task");
+      createChild("child-1");
+      createChild("child-2");
+
+      emitTaskCall("call-2", "second task", { sessionId: "child-2" });
+
+      expect(descriptions(onSubagent)).toEqual({ "child-1": "", "child-2": "second task" });
+    });
+
+    it("applies nothing while two open calls name no child", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      summaryAggregator.setSession("root-session");
+      emitTaskCall("call-1", "first task");
+      emitTaskCall("call-2", "second task");
+      createChild("child-1");
+
+      emitTaskCall("call-2", "second task");
+      emitTaskCall("call-1", "first task");
+
+      expect(descriptions(onSubagent)).toEqual({ "child-1": "" });
+    });
+
+    it("pairs the only open call with the only waiting card", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      summaryAggregator.setSession("root-session");
+      emitTaskCall("call-1", "first task");
+      createChild("child-1");
+
+      emitTaskCall("call-1", "first task");
+
+      expect(onSubagent.mock.lastCall?.[1]).toEqual([
+        expect.objectContaining({
+          sessionId: "child-1",
+          description: "first task",
+          agent: "explore",
+        }),
+      ]);
+    });
+
+    it("never pairs a card that ended without its input", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      summaryAggregator.setSession("root-session");
+      emitTaskCall("call-1", "first task");
+      emitTaskCall("call-2", "second task");
+      createChild("child-2");
+      emitTaskCall("call-2", "second task", { status: "completed" });
+      endChild("child-2");
+      const ended = onSubagent.mock.lastCall?.[1][0];
+
+      emitTaskCall("call-1", "first task");
+      createChild("child-1");
+
+      expect(ended).toMatchObject({ sessionId: "child-2", description: "", status: "completed" });
+      expect(descriptions(onSubagent)).toEqual({ "child-1": "" });
+    });
+
+    it("forgets a call that never ended once the parent's turn ends", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      summaryAggregator.setSession("root-session");
+      emitTaskCall("call-stale", "lost task");
+      endChild("root-session");
+      summaryAggregator.processEvent({
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "root-user-2",
+            sessionID: "root-session",
+            role: "user",
+            time: { created: Date.now() },
+          },
+        },
+      } as unknown as Event);
+
+      emitTaskCall("call-1", "first task");
+      createChild("child-1");
+      emitTaskCall("call-1", "first task");
+
+      expect(descriptions(onSubagent)).toEqual({ "child-1": "first task" });
+    });
+
+    it("keeps updating only the card a call was paired with", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      summaryAggregator.setSession("root-session");
+      emitTaskCall("call-1", "first task");
+      createChild("child-1");
+      emitTaskCall("call-1", "first task");
+      emitTaskCall("call-2", "second task");
+      createChild("child-2");
+
+      emitTaskCall("call-1", "first task, refined");
+
+      expect(descriptions(onSubagent)).toEqual({
+        "child-1": "first task, refined",
+        "child-2": "",
+      });
+    });
+  });
+
   describe("subagent current tool timing", () => {
     function startSubagent(): void {
       summaryAggregator.setSession("root-session");
@@ -536,6 +704,724 @@ describe("summary/aggregator", () => {
       expect(card.finishedAt).toEqual(expect.any(Number));
       expect(card.finishedAt).toBeGreaterThanOrEqual(card.createdAt);
       expect(card.currentToolStartedAt).toBeUndefined();
+    });
+
+    function launchInBackground(): void {
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "root-task",
+            sessionID: "root-session",
+            messageID: "root-message",
+            type: "tool",
+            callID: "call-task",
+            tool: "task",
+            state: {
+              status: "running",
+              input: { description: "task description", background: true },
+              metadata: { sessionId: "child-session-1" },
+              time: { start: Date.now() },
+            },
+          },
+        },
+      } as unknown as Event);
+    }
+
+    function emitIdle(sessionID: string): void {
+      summaryAggregator.processEvent({
+        type: "session.idle",
+        properties: { sessionID },
+      } as unknown as Event);
+    }
+
+    it("keeps a background subagent's card after its parent's turn ends", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      startSubagent();
+      launchInBackground();
+      emitIdle("root-session");
+
+      emitChildTool("call-1");
+      expect(onSubagent.mock.lastCall?.[1][0]).toMatchObject({
+        background: true,
+        status: "running",
+        currentToolCallId: "call-1",
+      });
+
+      emitIdle("child-session-1");
+      expect(onSubagent.mock.lastCall?.[1][0]).toMatchObject({
+        status: "completed",
+        finishedAt: expect.any(Number),
+      });
+    });
+
+    it("keeps a background card through an update of its session in a later run", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      startSubagent();
+      launchInBackground();
+      emitIdle("root-session");
+      summaryAggregator.processEvent({
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "user-message-next",
+            sessionID: "root-session",
+            role: "user",
+            time: { created: Date.now() + 1000 },
+          },
+        },
+      } as unknown as Event);
+      summaryAggregator.processEvent({
+        type: "session.updated",
+        properties: {
+          info: {
+            id: "child-session-1",
+            parentID: "root-session",
+            title: "task description (@explore subagent)",
+            slug: "child",
+            directory: "D:/repo",
+            projectID: "p1",
+            version: "1",
+            time: { created: 1, updated: Date.now() },
+          },
+        },
+      } as unknown as Event);
+
+      emitChildTool("call-2");
+      expect(onSubagent.mock.lastCall?.[1][0].currentToolCallId).toBe("call-2");
+    });
+
+    it("still retires a foreground subagent's card when the parent's turn ends", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      startSubagent();
+      emitIdle("root-session");
+      const callsAfterIdle = onSubagent.mock.calls.length;
+
+      emitChildTool("call-1");
+      expect(onSubagent.mock.calls).toHaveLength(callsAfterIdle);
+    });
+
+    it("stops following a background subagent once it is retired", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      startSubagent();
+      launchInBackground();
+      emitIdle("root-session");
+      summaryAggregator.retireBackgroundSubagents();
+      const callsAfterStop = onSubagent.mock.calls.length;
+
+      emitChildTool("call-1");
+      emitIdle("child-session-1");
+      expect(onSubagent.mock.calls).toHaveLength(callsAfterStop);
+    });
+
+    describe("an interrupted subagent", () => {
+      function emitInterruptedIdle(sessionID: string): void {
+        summaryAggregator.processEvent({
+          type: "session.idle",
+          properties: { sessionID, interrupted: true },
+        } as unknown as Event);
+      }
+
+      function emitError(sessionID: string, error: Record<string, unknown>): void {
+        summaryAggregator.processEvent({
+          type: "session.error",
+          properties: { sessionID, error },
+        } as unknown as Event);
+      }
+
+      const abortError = { name: "MessageAbortedError", data: { message: "Aborted" } };
+
+      function lastCards(onSubagent: ReturnType<typeof vi.fn>) {
+        return onSubagent.mock.lastCall?.[1] as Array<Record<string, unknown>>;
+      }
+
+      it("ends the card interrupted when OpenCode V2 interrupts the subagent", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitChildTool("call-1");
+
+        emitInterruptedIdle("child-session-1");
+
+        expect(lastCards(onSubagent)[0]).toMatchObject({
+          status: "interrupted",
+          finishedAt: expect.any(Number),
+          currentTool: undefined,
+        });
+      });
+
+      it("ends the card interrupted, not failed, on an OpenCode V1 abort error", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitChildTool("call-1");
+
+        emitError("child-session-1", abortError);
+
+        expect(lastCards(onSubagent)[0]).toMatchObject({
+          status: "interrupted",
+          terminalMessage: undefined,
+        });
+      });
+
+      it("still ends a genuinely failed subagent with its error", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+
+        emitError("child-session-1", { name: "UnknownError", data: { message: "boom" } });
+
+        expect(lastCards(onSubagent)[0]).toMatchObject({ status: "error", terminalMessage: "boom" });
+      });
+
+      it("ends running cards, a nested subagent getting none, when the parent run is interrupted", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitChildTool("call-1");
+        summaryAggregator.processEvent({
+          type: "session.created",
+          properties: {
+            info: {
+              id: "grandchild-session-1",
+              parentID: "child-session-1",
+              title: "nested task (@general subagent)",
+              slug: "grandchild",
+              directory: "D:/repo",
+              projectID: "p1",
+              version: "1",
+              time: { created: Date.now(), updated: Date.now() },
+            },
+          },
+        } as unknown as Event);
+
+        emitInterruptedIdle("root-session");
+
+        const cards = lastCards(onSubagent);
+        expect(cards).toHaveLength(1);
+        expect(cards[0]).toMatchObject({ sessionId: "child-session-1", status: "interrupted" });
+
+        const callsAfterInterrupt = onSubagent.mock.calls.length;
+        emitChildTool("call-2");
+        emitIdle("child-session-1");
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterInterrupt);
+      });
+
+      it("ends running cards when the parent run stops with an OpenCode V1 abort error", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitChildTool("call-1");
+
+        emitError("root-session", abortError);
+
+        expect(lastCards(onSubagent)[0]).toMatchObject({ status: "interrupted" });
+      });
+
+      it("leaves cards running when the parent run simply ends", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitChildTool("call-1");
+
+        emitIdle("root-session");
+
+        expect(lastCards(onSubagent)[0]).toMatchObject({ status: "running" });
+      });
+
+      it("keeps a background card followed, ignoring its activity, until its real end", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        launchInBackground();
+        emitChildTool("call-1");
+
+        summaryAggregator.interruptSubagents();
+        const interrupted = lastCards(onSubagent)[0]!;
+        expect(interrupted).toMatchObject({ status: "interrupted", background: true });
+
+        const callsAfterInterrupt = onSubagent.mock.calls.length;
+        emitChildTool("call-2");
+        emitIdle("root-session");
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterInterrupt);
+
+        vi.spyOn(Date, "now").mockReturnValue((interrupted.finishedAt as number) + 5_000);
+        try {
+          emitIdle("child-session-1");
+        } finally {
+          vi.restoreAllMocks();
+        }
+
+        expect(lastCards(onSubagent)[0]).toMatchObject({
+          status: "completed",
+          finishedAt: (interrupted.finishedAt as number) + 5_000,
+        });
+      });
+
+      it("switches an interrupted background card to the failure its subagent reports", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        launchInBackground();
+
+        summaryAggregator.interruptSubagents();
+        emitError("child-session-1", { name: "UnknownError", data: { message: "boom" } });
+
+        expect(lastCards(onSubagent)[0]).toMatchObject({ status: "error", terminalMessage: "boom" });
+      });
+
+      it("keeps an interrupted background card as it is when its subagent is interrupted too", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        launchInBackground();
+
+        summaryAggregator.interruptSubagents();
+        const callsAfterInterrupt = onSubagent.mock.calls.length;
+        emitInterruptedIdle("child-session-1");
+        emitIdle("child-session-1");
+
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterInterrupt);
+      });
+
+      it("does not touch a card that already ended", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitIdle("child-session-1");
+        const callsAfterEnd = onSubagent.mock.calls.length;
+
+        summaryAggregator.interruptSubagents();
+        summaryAggregator.interruptSubagents(true);
+
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterEnd);
+      });
+
+      it("gives a subagent resumed after a server restart a new card", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        launchInBackground();
+        emitChildTool("call-1");
+
+        summaryAggregator.interruptSubagents(true);
+        const interrupted = lastCards(onSubagent)[0]!;
+        expect(interrupted.status).toBe("interrupted");
+
+        emitChildTool("call-2");
+
+        const resumed = lastCards(onSubagent);
+        expect(resumed).toHaveLength(1);
+        expect(resumed[0]).toMatchObject({ status: "running", currentToolCallId: "call-2" });
+        expect(resumed[0]!.cardId).not.toBe(interrupted.cardId);
+      });
+    });
+
+    describe("a nested subagent", () => {
+      function createSession(id: string, parentID: string): void {
+        summaryAggregator.processEvent({
+          type: "session.created",
+          properties: {
+            info: {
+              id,
+              parentID,
+              title: "Count Kotlin files (@general subagent)",
+              slug: id,
+              directory: "D:/repo",
+              projectID: "p1",
+              version: "1",
+              time: { created: Date.now(), updated: Date.now() },
+            },
+          },
+        } as unknown as Event);
+      }
+
+      function emitPart(sessionID: string, part: Record<string, unknown>): void {
+        summaryAggregator.processEvent({
+          type: "message.part.updated",
+          properties: {
+            part: { id: `${sessionID}-${String(part.type)}`, sessionID, messageID: `${sessionID}-m`, ...part },
+          },
+        } as unknown as Event);
+      }
+
+      function emitLaunch(
+        callID: string,
+        status: string,
+        input: Record<string, unknown> = { description: "Count Kotlin files", prompt: "Count" },
+      ): void {
+        emitPart("child-session-1", {
+          type: "tool",
+          callID,
+          tool: "task",
+          state: { status, input, metadata: {}, time: { start: Date.now() } },
+        });
+      }
+
+      function emitError(sessionID: string): void {
+        summaryAggregator.processEvent({
+          type: "session.error",
+          properties: { sessionID, error: { name: "UnknownError", data: { message: "boom" } } },
+        } as unknown as Event);
+      }
+
+      function lastCard(onSubagent: ReturnType<typeof vi.fn>): Record<string, unknown> {
+        return (onSubagent.mock.lastCall?.[1] as Array<Record<string, unknown>>)[0]!;
+      }
+
+      function at<T>(time: number, action: () => T): T {
+        const spy = vi.spyOn(Date, "now").mockReturnValue(time);
+        try {
+          return action();
+        } finally {
+          spy.mockRestore();
+        }
+      }
+
+      it("never gets a card of its own, at any depth", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitChildTool("call-1");
+        const callsBeforeNested = onSubagent.mock.calls.length;
+
+        createSession("nested-session-1", "child-session-1");
+        createSession("nested-session-2", "nested-session-1");
+        summaryAggregator.processEvent({
+          type: "message.updated",
+          properties: {
+            info: {
+              id: "nested-message",
+              sessionID: "nested-session-1",
+              role: "assistant",
+              agent: "general",
+              providerID: "openai",
+              modelID: "gpt-5.4",
+              time: { created: Date.now() },
+            },
+          },
+        } as unknown as Event);
+        emitPart("nested-session-1", { type: "step-start" });
+        emitPart("nested-session-1", {
+          type: "tool",
+          callID: "nested-call",
+          tool: "glob",
+          state: { status: "running", input: { pattern: "**/*.kt" }, time: { start: Date.now() } },
+        });
+        emitPart("nested-session-2", {
+          type: "tool",
+          callID: "deeper-call",
+          tool: "glob",
+          state: { status: "running", input: { pattern: "**/*.kt" }, time: { start: Date.now() } },
+        });
+        emitPart("child-session-1", {
+          type: "subtask",
+          prompt: "Count",
+          description: "Count Kotlin files",
+          agent: "general",
+        });
+        emitIdle("nested-session-2");
+        emitIdle("nested-session-1");
+
+        for (const [, cards] of onSubagent.mock.calls.slice(callsBeforeNested - 1)) {
+          expect((cards as Array<{ sessionId: string }>).map((card) => card.sessionId)).toEqual([
+            "child-session-1",
+          ]);
+        }
+        expect(lastCard(onSubagent)).toMatchObject({ status: "running", currentTool: "bash" });
+      });
+
+      it("still passes its questions and permission requests on, resolved to the root", async () => {
+        const onQuestion = vi.fn();
+        const onPermission = vi.fn();
+        summaryAggregator.setOnQuestion(onQuestion);
+        summaryAggregator.setOnPermission(onPermission);
+        startSubagent();
+        createSession("nested-session-1", "child-session-1");
+
+        summaryAggregator.processEvent({
+          type: "question.asked",
+          properties: {
+            id: "q-nested",
+            sessionID: "nested-session-1",
+            questions: [{ header: "Pick", question: "Which?", options: [] }],
+          },
+        } as unknown as Event);
+        summaryAggregator.processEvent({
+          type: "permission.asked",
+          properties: {
+            id: "p-nested",
+            sessionID: "nested-session-1",
+            permission: "bash",
+            patterns: ["ls"],
+            metadata: {},
+            always: [],
+          },
+        } as unknown as Event);
+
+        await vi.waitFor(() => {
+          expect(onQuestion).toHaveBeenCalledTimes(1);
+          expect(onPermission).toHaveBeenCalledTimes(1);
+        });
+        expect(onQuestion.mock.calls[0]?.[2]).toBe("nested-session-1");
+        expect(summaryAggregator.isSubagentSession("nested-session-1")).toBe(true);
+        expect(summaryAggregator.getRootSessionId("nested-session-1")).toBe("root-session");
+      });
+
+      it("is followed when a background parent launches it after the root's turn ended", () => {
+        startSubagent();
+        launchInBackground();
+        emitIdle("root-session");
+
+        createSession("nested-session-1", "child-session-1");
+
+        expect(summaryAggregator.getRootSessionId("nested-session-1")).toBe("root-session");
+      });
+
+      it("stops being tracked when it ends, unless a deeper one still runs under it", () => {
+        startSubagent();
+        createSession("nested-session-1", "child-session-1");
+        createSession("nested-session-2", "nested-session-1");
+
+        emitIdle("nested-session-1");
+        expect(summaryAggregator.getRootSessionId("nested-session-2")).toBe("root-session");
+
+        emitError("nested-session-2");
+        expect(summaryAggregator.isSubagentSession("nested-session-2")).toBe(false);
+        expect(summaryAggregator.isSubagentSession("nested-session-1")).toBe(false);
+        expect(summaryAggregator.isSubagentSession("child-session-1")).toBe(true);
+      });
+
+      it("shows its launch on the parent's line once the call carries its arguments", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+
+        at(1_000, () => emitLaunch("launch-1", "pending", {}));
+        expect(lastCard(onSubagent)).toMatchObject({
+          currentTool: "task",
+          launchStartedAt: undefined,
+        });
+
+        at(2_000, () => emitLaunch("launch-1", "running"));
+        expect(lastCard(onSubagent)).toMatchObject({
+          currentTool: "task",
+          currentToolCallId: "launch-1",
+          currentToolStartedAt: 1_000,
+          launchStartedAt: 1_000,
+          waitsOnBackgroundLaunch: false,
+        });
+
+        emitLaunch("launch-1", "completed");
+        expect(lastCard(onSubagent)).toMatchObject({
+          status: "running",
+          currentTool: undefined,
+          launchStartedAt: undefined,
+        });
+      });
+
+      it("keeps the newest of parallel launches on the line, falling back to one still running", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+
+        at(1_000, () => emitLaunch("launch-1", "running"));
+        at(2_000, () => emitLaunch("launch-2", "running"));
+        at(3_000, () => emitLaunch("launch-1", "running", { prompt: "Count", description: "Again" }));
+        expect(lastCard(onSubagent)).toMatchObject({
+          currentToolCallId: "launch-2",
+          currentToolStartedAt: 2_000,
+        });
+
+        emitLaunch("launch-2", "completed");
+        expect(lastCard(onSubagent)).toMatchObject({
+          currentTool: undefined,
+          launchStartedAt: 1_000,
+        });
+
+        emitLaunch("launch-1", "completed");
+        expect(lastCard(onSubagent)).toMatchObject({ launchStartedAt: undefined });
+      });
+
+      it("leaves the line to a newer tool when a background launch ends", () => {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        emitLaunch("launch-1", "running", { prompt: "Count", background: true });
+        emitChildTool("call-1");
+
+        emitLaunch("launch-1", "completed", { prompt: "Count", background: true });
+
+        expect(lastCard(onSubagent)).toMatchObject({
+          currentTool: "bash",
+          currentToolCallId: "call-1",
+          launchStartedAt: undefined,
+          waitsOnBackgroundLaunch: false,
+        });
+      });
+
+      function holdParentEnd() {
+        const onSubagent = vi.fn();
+        summaryAggregator.setOnSubagent(onSubagent);
+        startSubagent();
+        at(1_000, () => emitLaunch("launch-1", "running", { prompt: "Count", background: true }));
+        emitChildTool("call-1");
+        at(5_000, () => emitIdle("child-session-1"));
+        return onSubagent;
+      }
+
+      it("holds the parent's own end until its background launch ends", () => {
+        const onSubagent = holdParentEnd();
+
+        expect(lastCard(onSubagent)).toMatchObject({
+          status: "running",
+          currentTool: undefined,
+          launchStartedAt: 1_000,
+          waitsOnBackgroundLaunch: true,
+        });
+
+        emitIdle("root-session");
+        const callsAfterTurn = onSubagent.mock.calls.length;
+        emitChildTool("call-2");
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterTurn);
+
+        at(9_000, () => emitLaunch("launch-1", "completed", { prompt: "Count", background: true }));
+        expect(lastCard(onSubagent)).toMatchObject({
+          status: "completed",
+          finishedAt: 5_000,
+          launchStartedAt: undefined,
+          waitsOnBackgroundLaunch: false,
+        });
+
+        const callsAfterEnd = onSubagent.mock.calls.length;
+        emitChildTool("call-3");
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterEnd);
+      });
+
+      it("ends a held card interrupted on /abort, without waiting for its launch", () => {
+        const onSubagent = holdParentEnd();
+        createSession("nested-session-1", "child-session-1");
+
+        summaryAggregator.interruptSubagents();
+        expect(lastCard(onSubagent)).toMatchObject({ status: "interrupted" });
+
+        const callsAfterInterrupt = onSubagent.mock.calls.length;
+        emitLaunch("launch-1", "completed", { prompt: "Count", background: true });
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterInterrupt);
+        expect(summaryAggregator.getRootSessionId("nested-session-1")).toBe("root-session");
+      });
+
+      it("stops following a held card when background operations stop", () => {
+        const onSubagent = holdParentEnd();
+        emitIdle("root-session");
+
+        summaryAggregator.retireBackgroundSubagents();
+        const callsAfterStop = onSubagent.mock.calls.length;
+        emitLaunch("launch-1", "completed", { prompt: "Count", background: true });
+
+        expect(onSubagent.mock.calls).toHaveLength(callsAfterStop);
+      });
+    });
+
+    function emitTaskPart(state: Record<string, unknown>): void {
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "root-task",
+            sessionID: "root-session",
+            messageID: "root-message",
+            type: "tool",
+            callID: "call-task",
+            tool: "task",
+            state,
+          },
+        },
+      } as unknown as Event);
+    }
+
+    it("honors a background task part that arrives before the child session is created", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      summaryAggregator.setSession("root-session");
+
+      emitTaskPart({
+        status: "running",
+        input: { description: "task description", background: true },
+        metadata: { sessionId: "child-session-1" },
+        time: { start: Date.now() },
+      });
+
+      summaryAggregator.processEvent({
+        type: "session.created",
+        properties: {
+          info: {
+            id: "child-session-1",
+            parentID: "root-session",
+            title: "task description (@explore subagent)",
+            slug: "child",
+            directory: "D:/repo",
+            projectID: "p1",
+            version: "1",
+            time: { created: Date.now(), updated: Date.now() },
+          },
+        },
+      } as unknown as Event);
+
+      expect(onSubagent.mock.lastCall?.[1][0]).toMatchObject({ background: true });
+
+      emitIdle("root-session");
+      emitChildTool("call-1");
+      expect(onSubagent.mock.lastCall?.[1][0]).toMatchObject({
+        background: true,
+        status: "running",
+        currentToolCallId: "call-1",
+      });
+    });
+
+    it("marks a promoted task as background when only its metadata carries the flag", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      startSubagent();
+
+      emitTaskPart({
+        status: "running",
+        input: { description: "task description" },
+        metadata: { sessionId: "child-session-1", background: true },
+        time: { start: Date.now() },
+      });
+
+      expect(onSubagent.mock.lastCall?.[1][0]).toMatchObject({ background: true });
+
+      emitIdle("root-session");
+      emitChildTool("call-1");
+      expect(onSubagent.mock.lastCall?.[1][0]).toMatchObject({
+        background: true,
+        currentToolCallId: "call-1",
+      });
+    });
+
+    it("still retires a plain foreground task at the turn boundary", () => {
+      const onSubagent = vi.fn();
+      summaryAggregator.setOnSubagent(onSubagent);
+      startSubagent();
+
+      emitTaskPart({
+        status: "running",
+        input: { description: "task description" },
+        metadata: { sessionId: "child-session-1" },
+        time: { start: Date.now() },
+      });
+
+      emitIdle("root-session");
+      const callsAfterIdle = onSubagent.mock.calls.length;
+
+      emitChildTool("call-1");
+      expect(onSubagent.mock.calls).toHaveLength(callsAfterIdle);
     });
 
     it("re-emits and restarts timing for an identical tool with a new call id", async () => {
@@ -1786,7 +2672,110 @@ describe("summary/aggregator", () => {
 
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(onSessionIdle).toHaveBeenCalledWith("session-1");
+    expect(onSessionIdle).toHaveBeenCalledWith("session-1", { interrupted: false });
+  });
+
+  it("passes the interrupted mark of an idle to the callback", async () => {
+    const onSessionIdle = vi.fn();
+    summaryAggregator.setOnSessionIdle(onSessionIdle);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "session.idle",
+      properties: { sessionID: "session-1", interrupted: true },
+    } as unknown as Event);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(onSessionIdle).toHaveBeenCalledWith("session-1", { interrupted: true });
+  });
+
+  describe("live turn start", () => {
+    function emitStatus(sessionID: string, type: "busy" | "idle"): void {
+      summaryAggregator.processEvent({
+        type: "session.status",
+        properties: { sessionID, status: { type } },
+      } as unknown as Event);
+    }
+
+    function emitIdle(sessionID: string): void {
+      summaryAggregator.processEvent({
+        type: "session.idle",
+        properties: { sessionID },
+      } as unknown as Event);
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("keeps the first busy of a turn until the session goes idle", () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1_000);
+      summaryAggregator.setSession("session-1");
+
+      emitStatus("session-1", "busy");
+      vi.setSystemTime(5_000);
+      emitStatus("session-1", "busy");
+
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBe(1_000);
+      expect(summaryAggregator.getLiveTurnStartedAt("session-2")).toBeNull();
+
+      emitIdle("session-1");
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBeNull();
+
+      emitStatus("session-1", "busy");
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBe(5_000);
+    });
+
+    it("starts a turn the stream missed unless one runs or one ended since the mark", () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1_000);
+      summaryAggregator.setSession("session-1");
+
+      const mark = summaryAggregator.getTurnEndMark();
+      summaryAggregator.startMissedLiveTurn("session-2", mark);
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBeNull();
+
+      summaryAggregator.startMissedLiveTurn("session-1", mark);
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBe(1_000);
+
+      vi.setSystemTime(2_000);
+      summaryAggregator.startMissedLiveTurn("session-1", mark);
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBe(1_000);
+
+      const staleMark = summaryAggregator.getTurnEndMark();
+      emitIdle("session-1");
+      summaryAggregator.startMissedLiveTurn("session-1", staleMark);
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBeNull();
+    });
+
+    it("forgets the turn on a session error, a reconnect and a session change", () => {
+      summaryAggregator.setSession("session-1");
+
+      emitStatus("session-1", "busy");
+      summaryAggregator.processEvent({
+        type: "session.error",
+        properties: { sessionID: "session-1", error: { message: "boom" } },
+      } as unknown as Event);
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBeNull();
+
+      emitStatus("session-1", "busy");
+      summaryAggregator.forgetLiveTurn();
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBeNull();
+
+      emitStatus("session-1", "busy");
+      summaryAggregator.setSession("session-2");
+      expect(summaryAggregator.getLiveTurnStartedAt("session-2")).toBeNull();
+    });
+
+    it("ignores a busy of another session", () => {
+      summaryAggregator.setSession("session-1");
+
+      emitStatus("session-2", "busy");
+
+      expect(summaryAggregator.getLiveTurnStartedAt("session-1")).toBeNull();
+    });
   });
 
   it("passes assistant metadata to onComplete", () => {
@@ -2056,7 +3045,9 @@ describe("summary/aggregator", () => {
 
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(onSessionError).toHaveBeenCalledWith("session-1", "Model not found: opencode/foo.");
+    expect(onSessionError).toHaveBeenCalledWith("session-1", "Model not found: opencode/foo.", {
+      interrupted: false,
+    });
   });
 
   it("reports session.status retry through callback", async () => {
@@ -2146,17 +3137,21 @@ describe("summary/aggregator", () => {
       sessionId: string;
       tool: string;
       hasFileAttachment: boolean;
-      fileData: {
-        filename: string;
-        buffer: Buffer;
-      };
+      files: Array<{
+        fileData: {
+          filename: string;
+          buffer: Buffer;
+        };
+      }>;
     };
 
     expect(filePayload.sessionId).toBe("session-1");
     expect(filePayload.tool).toBe("apply_patch");
     expect(filePayload.hasFileAttachment).toBe(true);
-    expect(filePayload.fileData.filename).toBe("edit_one.ts.txt");
-    expect(filePayload.fileData.buffer.toString("utf8")).toContain("Edit File/Path: src/one.ts");
+    expect(filePayload.files[0]?.fileData.filename).toBe("edit_one.ts.txt");
+    expect(filePayload.files[0]?.fileData.buffer.toString("utf8")).toContain(
+      "Edit File/Path: src/one.ts",
+    );
   });
 
   it("sends apply_patch file using title and patchText fallback", () => {
@@ -2208,15 +3203,197 @@ describe("summary/aggregator", () => {
 
     const filePayload = defined(onToolFile.mock.calls[0]?.[0]) as {
       hasFileAttachment: boolean;
-      fileData: {
-        filename: string;
-        buffer: Buffer;
-      };
+      files: Array<{
+        fileData: {
+          filename: string;
+          buffer: Buffer;
+        };
+      }>;
     };
 
     expect(filePayload.hasFileAttachment).toBe(true);
-    expect(filePayload.fileData.filename).toBe("edit_README.md.txt");
-    expect(filePayload.fileData.buffer.toString("utf8")).toContain("Edit File/Path: README.md");
+    expect(filePayload.files[0]?.fileData.filename).toBe("edit_README.md.txt");
+    expect(filePayload.files[0]?.fileData.buffer.toString("utf8")).toContain(
+      "Edit File/Path: README.md",
+    );
+  });
+
+  it("sends one apply_patch document and one file change per changed file", () => {
+    const onTool = vi.fn();
+    const onToolFile = vi.fn();
+    const onFileChange = vi.fn();
+    summaryAggregator.setOnTool(onTool);
+    summaryAggregator.setOnToolFile(onToolFile);
+    summaryAggregator.setOnFileChange(onFileChange);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-multi",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-multi",
+          sessionID: "session-1",
+          messageID: "message-multi",
+          type: "tool",
+          callID: "call-apply-patch-multi",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            title: "Success. Updated the following files:\nM src\\one.ts\nA src\\two.ts",
+            input: { patchText: "*** Begin Patch" },
+            metadata: {
+              diff: "combined",
+              files: [
+                {
+                  filePath: "D:\\repo\\src\\one.ts",
+                  relativePath: "src\\one.ts",
+                  type: "update",
+                  diff: ["--- a/src/one.ts", "+++ b/src/one.ts", "@@ -1 +1 @@", "-a", "+b"].join(
+                    "\n",
+                  ),
+                  additions: 1,
+                  deletions: 1,
+                },
+                {
+                  filePath: "D:\\repo\\src\\two.ts",
+                  relativePath: "src\\two.ts",
+                  type: "add",
+                  patch: ["--- /dev/null", "+++ b/src/two.ts", "@@ -0,0 +1,2 @@", "+x", "+y"].join(
+                    "\n",
+                  ),
+                  additions: 2,
+                  deletions: 0,
+                },
+              ],
+            },
+          },
+        },
+      },
+    } as unknown as Event);
+
+    expect(defined(onTool.mock.calls[0]?.[0])).toEqual(
+      expect.objectContaining({ tool: "apply_patch", hasFileAttachment: true }),
+    );
+    expect(onToolFile).toHaveBeenCalledTimes(1);
+    const filePayload = defined(onToolFile.mock.calls[0]?.[0]) as {
+      files: Array<{ fileData: { filename: string } | null; line?: string }>;
+    };
+    expect(filePayload.files.map(({ fileData }) => fileData?.filename)).toEqual([
+      "edit_one.ts.txt",
+      "edit_two.ts.txt",
+    ]);
+    expect(filePayload.files.map(({ line }) => line)).toEqual([
+      "🩹 apply_patch src/one.ts (+1 -1)",
+      "🩹 apply_patch src/two.ts (+2)",
+    ]);
+    expect(onFileChange.mock.calls.map((call) => call[1])).toEqual([
+      { file: "src/one.ts", additions: 1, deletions: 1 },
+      { file: "src/two.ts", additions: 2, deletions: 0 },
+    ]);
+  });
+
+  it("leaves an oversized apply_patch file as a text line and keeps the other documents", () => {
+    const onToolFile = vi.fn();
+    const onFileChange = vi.fn();
+    summaryAggregator.setOnToolFile(onToolFile);
+    summaryAggregator.setOnFileChange(onFileChange);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-big",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-big",
+          sessionID: "session-1",
+          messageID: "message-big",
+          type: "tool",
+          callID: "call-apply-patch-big",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: { patchText: "*** Begin Patch" },
+            metadata: {
+              files: [
+                {
+                  relativePath: "src/huge.ts",
+                  diff: "+" + "x".repeat(101 * 1024),
+                },
+                {
+                  relativePath: "src/small.ts",
+                  diff: "+one",
+                },
+              ],
+            },
+          },
+        },
+      },
+    } as unknown as Event);
+
+    const filePayload = defined(onToolFile.mock.calls[0]?.[0]) as {
+      files: Array<{ fileData: { filename: string } | null; line?: string }>;
+    };
+    expect(filePayload.files).toEqual([
+      { fileData: null, line: "🩹 apply_patch src/huge.ts (+1)" },
+      expect.objectContaining({
+        fileData: expect.objectContaining({ filename: "edit_small.ts.txt" }),
+        line: "🩹 apply_patch src/small.ts (+1)",
+      }),
+    ]);
+    expect(onFileChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("adds nothing for a failed apply_patch", () => {
+    const onToolFile = vi.fn();
+    const onFileChange = vi.fn();
+    summaryAggregator.setOnToolFile(onToolFile);
+    summaryAggregator.setOnFileChange(onFileChange);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-failed",
+          sessionID: "session-1",
+          messageID: "message-failed",
+          type: "tool",
+          callID: "call-apply-patch-failed",
+          tool: "apply_patch",
+          state: {
+            status: "error",
+            input: { patchText: "*** Begin Patch\n*** Update File: src/one.ts\n@@\n-a\n+b" },
+            error: "patch verification failed",
+          },
+        },
+      },
+    } as unknown as Event);
+
+    expect(onToolFile).not.toHaveBeenCalled();
+    expect(onFileChange).not.toHaveBeenCalled();
   });
 
   it("fires onTokens with isCompleted=true when message has completed timestamp", () => {
@@ -2483,6 +3660,140 @@ describe("summary/aggregator", () => {
 
     await vi.waitFor(() => {
       expect(calls).toEqual(["start:req-1", "end:req-1", "start:req-2", "end:req-2"]);
+    });
+  });
+
+  describe("requests of subagent sessions", () => {
+    function trackChildSession(): void {
+      summaryAggregator.setSession("root-session");
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "subtask-1",
+            sessionID: "root-session",
+            messageID: "root-message",
+            type: "subtask",
+            prompt: "Ask the user",
+            description: "Ask the user",
+            agent: "general",
+          },
+        },
+      } as unknown as Event);
+      summaryAggregator.processEvent({
+        type: "session.created",
+        properties: {
+          info: {
+            id: "child-session-1",
+            parentID: "root-session",
+            title: "Ask the user (@general subagent)",
+            slug: "child",
+            directory: "D:/repo",
+            projectID: "p1",
+            version: "1",
+            time: { created: Date.now(), updated: Date.now() },
+          },
+        },
+      } as unknown as Event);
+    }
+
+    function emitQuestion(id: string, sessionID: string): void {
+      summaryAggregator.processEvent({
+        type: "question.asked",
+        properties: {
+          id,
+          sessionID,
+          questions: [{ header: "Pick", question: "Which?", options: [] }],
+        },
+      } as unknown as Event);
+    }
+
+    it("forwards question.asked from a tracked subagent session and ignores unrelated ones", async () => {
+      const onQuestion = vi.fn();
+      summaryAggregator.setOnQuestion(onQuestion);
+      trackChildSession();
+
+      emitQuestion("q-child", "child-session-1");
+      emitQuestion("q-other", "some-other-session");
+
+      await vi.waitFor(() => {
+        expect(onQuestion).toHaveBeenCalledTimes(1);
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(onQuestion).toHaveBeenCalledTimes(1);
+      expect(onQuestion.mock.calls[0]?.[1]).toBe("q-child");
+      expect(onQuestion.mock.calls[0]?.[2]).toBe("child-session-1");
+    });
+
+    it("reports questions settled outside Telegram for the followed session and its subagents", async () => {
+      const onQuestionSettled = vi.fn();
+      summaryAggregator.setOnQuestionSettled(onQuestionSettled);
+      trackChildSession();
+
+      summaryAggregator.processEvent({
+        type: "question.replied",
+        properties: { sessionID: "root-session", requestID: "q-root", answers: [] },
+      } as unknown as Event);
+      summaryAggregator.processEvent({
+        type: "question.rejected",
+        properties: { sessionID: "child-session-1", requestID: "q-child" },
+      } as unknown as Event);
+      summaryAggregator.processEvent({
+        type: "question.replied",
+        properties: { sessionID: "some-other-session", requestID: "q-other", answers: [] },
+      } as unknown as Event);
+
+      await vi.waitFor(() => {
+        expect(onQuestionSettled).toHaveBeenCalledTimes(2);
+      });
+      expect(onQuestionSettled).toHaveBeenCalledWith("root-session", "q-root", "answered");
+      expect(onQuestionSettled).toHaveBeenCalledWith("child-session-1", "q-child", "cancelled");
+    });
+
+    it("passes OpenCode's decision along with a replied permission", async () => {
+      const onPermissionReplied = vi.fn();
+      summaryAggregator.setOnPermissionReplied(onPermissionReplied);
+      trackChildSession();
+
+      summaryAggregator.processEvent({
+        type: "permission.replied",
+        properties: { sessionID: "child-session-1", requestID: "perm-1", reply: "reject" },
+      } as unknown as Event);
+      summaryAggregator.processEvent({
+        type: "permission.replied",
+        properties: { sessionID: "root-session", requestID: "perm-2" },
+      } as unknown as Event);
+
+      await vi.waitFor(() => {
+        expect(onPermissionReplied).toHaveBeenCalledTimes(2);
+      });
+      expect(onPermissionReplied).toHaveBeenCalledWith("child-session-1", "perm-1", "reject");
+      expect(onPermissionReplied).toHaveBeenCalledWith("root-session", "perm-2", null);
+    });
+
+    it("reports the end of a run for the followed session and its subagents", async () => {
+      const onSessionRunEnded = vi.fn();
+      summaryAggregator.setOnSessionRunEnded(onSessionRunEnded);
+      trackChildSession();
+
+      summaryAggregator.processEvent({
+        type: "session.error",
+        properties: { sessionID: "child-session-1", error: { name: "UnknownError", data: {} } },
+      } as unknown as Event);
+      summaryAggregator.processEvent({
+        type: "session.idle",
+        properties: { sessionID: "root-session" },
+      } as unknown as Event);
+      summaryAggregator.processEvent({
+        type: "session.idle",
+        properties: { sessionID: "some-other-session" },
+      } as unknown as Event);
+
+      await vi.waitFor(() => {
+        expect(onSessionRunEnded).toHaveBeenCalledTimes(2);
+      });
+      expect(onSessionRunEnded).toHaveBeenCalledWith("child-session-1");
+      expect(onSessionRunEnded).toHaveBeenCalledWith("root-session");
     });
   });
 
@@ -2952,7 +4263,9 @@ describe("summary/aggregator", () => {
 
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(onSessionError).toHaveBeenCalledWith("session-1", "Unknown session error");
+      expect(onSessionError).toHaveBeenCalledWith("session-1", "Unknown session error", {
+        interrupted: false,
+      });
       expect(warnSpy).toHaveBeenCalled();
     });
 
@@ -2972,7 +4285,9 @@ describe("summary/aggregator", () => {
 
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(onSessionError).toHaveBeenCalledWith("session-1", "upstream exploded");
+      expect(onSessionError).toHaveBeenCalledWith("session-1", "upstream exploded", {
+        interrupted: false,
+      });
       expect(warnSpy).toHaveBeenCalled();
     });
 

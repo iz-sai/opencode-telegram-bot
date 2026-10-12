@@ -14,6 +14,7 @@ import { logger } from "../../utils/logger.js";
 import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { config } from "../../config.js";
 import { t } from "../../i18n/index.js";
+import { formatSessionTitle } from "../../app/formatters/session-title-formatter.js";
 import { alert, failure } from "./feedback.js";
 import { attachToSession } from "../../app/services/attach-service.js";
 import { renderAssistantFinalPartsSafe } from "../messages/assistant-rendering.js";
@@ -42,6 +43,7 @@ export type SessionSelectDeps = Pick<
   | "interactionManager"
   | "keyboardManager"
   | "permissionManager"
+  | "pinnedMessageManager"
   | "questionManager"
   | "resetInteractions"
   | "summaryAggregator"
@@ -112,9 +114,13 @@ export async function selectSessionById(
     directory: currentProject.worktree,
   };
   setCurrentSession(sessionInfo);
+  // The attach does not redraw the dashboard already showing this session.
+  const pinnedState = deps.pinnedMessageManager.getState();
+  const isSessionOnDashboard =
+    pinnedState.sessionId === session.id && Boolean(pinnedState.messageId);
   // Pull before attaching: the pinned message is rendered inside attachToSession
   // and reads the stored model, so its Model line comes out already pulled.
-  applySessionSettings(session);
+  const modelChanged = await applySessionSettings(session);
   deps.resetInteractions("session_switched");
 
   await ctx.answerCallbackQuery();
@@ -157,6 +163,10 @@ export async function selectSessionById(
       throw err;
     }
 
+    if (isSessionOnDashboard && modelChanged) {
+      await deps.pinnedMessageManager.onModelChange();
+    }
+
     if (ctx.chat) {
       const chatId = ctx.chat.id;
       const currentAgent = await resolveProjectAgent();
@@ -181,7 +191,7 @@ export async function selectSessionById(
       try {
         await ctx.api.sendMessage(
           chatId,
-          t("sessions.selected", { title: session.title }),
+          t("sessions.selected", { title: formatSessionTitle(session.title) }),
           keyboard ? { reply_markup: keyboard } : {},
         );
       } catch (err) {

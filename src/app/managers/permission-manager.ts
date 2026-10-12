@@ -1,5 +1,8 @@
 import type {
   GroupedPermissionMessage,
+  PermissionOutcome,
+  PermissionPromptChange,
+  PermissionReply,
   PermissionRequest,
   PermissionState,
 } from "../types/permission.js";
@@ -17,12 +20,16 @@ function createEmptyState(): PermissionState {
     requestsByMessageId: new Map(),
     requestIdsByMessageId: new Map(),
     messageIdBySignature: new Map(),
+    sendsByMessageId: new Map(),
   };
 }
 
 export class PermissionManager {
   private resolvedRequestIDs = new Set<string>();
   private resolvedGeneration = 0;
+  // Prompts on their way to Telegram, by signature: a second show of the same request
+  // waits for the first to land instead of sending its own prompt.
+  private presenting = new Map<string, Promise<void>>();
 
   constructor(private readonly interactionManager: InteractionManager) {}
 
@@ -63,6 +70,27 @@ export class PermissionManager {
     }
 
     return this.getResolvedRequestIDs().has(request.id) ? "resolved" : null;
+  }
+
+  /** The send of a prompt with this request's signature, while one is on its way. */
+  getPresenting(request: PermissionRequest): Promise<void> | undefined {
+    return this.presenting.get(this.getRequestSignature(request));
+  }
+
+  /** Marks a prompt with this request's signature as on its way; the returned call ends that. */
+  claimPresenting(request: PermissionRequest): () => void {
+    const signature = this.getRequestSignature(request);
+    let release = () => {};
+    const landed = new Promise<void>((resolve) => {
+      release = () => {
+        if (this.presenting.get(signature) === landed) {
+          this.presenting.delete(signature);
+        }
+        resolve();
+      };
+    });
+    this.presenting.set(signature, landed);
+    return release;
   }
 
   /**
@@ -108,6 +136,7 @@ export class PermissionManager {
       // Drop the replaced request's signature so it cannot later group new
       // requests behind a message that now shows something else.
       state.messageIdBySignature.delete(this.getRequestSignature(previous));
+      state.sendsByMessageId.delete(messageId);
     }
 
     state.requestsByMessageId.set(messageId, request);
@@ -142,7 +171,8 @@ export class PermissionManager {
 
     const signature = this.getRequestSignature(request);
     const messageId = state.messageIdBySignature.get(signature);
-    if (messageId === undefined) {
+    if (messageId === undefined || state.sendsByMessageId.has(messageId)) {
+      // A prompt whose answer is on its way cannot take a request that answer does not cover.
       return null;
     }
 
@@ -238,59 +268,212 @@ export class PermissionManager {
   }
 
   /**
-   * Remove permission request by Telegram message ID
+   * Record the answer tapped on a prompt as being sent. False when one is already on its way.
    */
-  removeByMessageId(messageId: number | null): PermissionRequest | null {
+  markSending(messageId: number, reply: PermissionReply, settlesSession: boolean): boolean {
     const state = this.state;
-    const request = this.getRequest(messageId);
-    if (!state || !request || messageId === null) {
-      return null;
+    const requestIds = state?.requestIdsByMessageId.get(messageId);
+    if (!state || !requestIds || state.sendsByMessageId.has(messageId)) {
+      return false;
     }
 
-    state.requestsByMessageId.delete(messageId);
-    state.requestIdsByMessageId.delete(messageId);
-    state.messageIdBySignature.delete(this.getRequestSignature(request));
+    state.sendsByMessageId.set(messageId, { reply, requestIds: [...requestIds], settlesSession });
+    return true;
+  }
 
-    logger.debug(
-      `[PermissionManager] Removed permission request: id=${request.id}, messageId=${messageId}, pending=${state.requestsByMessageId.size}`,
-    );
-
-    return request;
+  isSending(messageId: number | null): boolean {
+    return messageId !== null && (this.state?.sendsByMessageId.has(messageId) ?? false);
   }
 
   /**
-   * Remove all Telegram messages tracking an OpenCode permission request ID,
-   * and drop the request if it is still waiting behind a poll
+   * The answer did not get through for every request: the ones OpenCode took leave the
+   * prompt, the rest stay open and answerable again
    */
-  resolveRequest(requestID: string): number[] {
+  failSending(messageId: number, acceptedRequestIds: string[]): PermissionPromptChange | null {
+    const state = this.state;
+    const request = state?.requestsByMessageId.get(messageId);
+    const send = state?.sendsByMessageId.get(messageId);
+    if (!state || !request || !send) {
+      return null;
+    }
+
+    state.sendsByMessageId.delete(messageId);
+    for (const requestID of acceptedRequestIds) {
+      this.getResolvedRequestIDs().add(requestID);
+    }
+
+    const openIds = (state.requestIdsByMessageId.get(messageId) ?? []).filter(
+      (requestID) => !acceptedRequestIds.includes(requestID),
+    );
+    if (openIds.length === 0) {
+      // The requests that failed were settled by OpenCode's own events meanwhile.
+      return this.endPrompt(messageId, { kind: "replied", reply: send.reply, outside: false });
+    }
+
+    state.requestIdsByMessageId.set(messageId, openIds);
+    return { messageId, request, openCount: openIds.length, outcome: null };
+  }
+
+  /**
+   * End a prompt with an outcome, settling every request it still has open
+   */
+  endPrompt(messageId: number, outcome: PermissionOutcome): PermissionPromptChange | null {
+    const state = this.state;
+    const request = state?.requestsByMessageId.get(messageId);
+    if (!state || !request) {
+      return null;
+    }
+
+    for (const requestID of state.requestIdsByMessageId.get(messageId) ?? []) {
+      this.getResolvedRequestIDs().add(requestID);
+      this.interactionManager.dropWaitingPermission(requestID);
+    }
+
+    this.removePrompt(state, messageId, request);
+    logger.debug(
+      `[PermissionManager] Ended permission prompt: messageId=${messageId}, outcome=${outcome.kind}, pending=${state.requestsByMessageId.size}`,
+    );
+    return { messageId, request, openCount: 0, outcome };
+  }
+
+  /**
+   * An OpenCode request was settled: it leaves its prompt, and the prompt ends once its
+   * last request is settled. `reply` is the decision OpenCode reported, when it did;
+   * `lost` says the request went with a server that stopped, so nobody answered it.
+   */
+  settleRequest(
+    requestID: string,
+    reply: PermissionReply | null,
+    lost = false,
+  ): PermissionPromptChange[] {
     this.getResolvedRequestIDs().add(requestID);
     this.interactionManager.dropWaitingPermission(requestID);
 
     const state = this.state;
-    const removedMessageIds: number[] = [];
     if (!state) {
-      return removedMessageIds;
+      return [];
     }
 
-    for (const [messageId, request] of state.requestsByMessageId) {
-      const requestIds = state.requestIdsByMessageId.get(messageId) ?? [request.id];
+    const changes: PermissionPromptChange[] = [];
+    for (const [messageId, request] of [...state.requestsByMessageId]) {
+      const requestIds = state.requestIdsByMessageId.get(messageId) ?? [];
       if (!requestIds.includes(requestID)) {
         continue;
       }
 
-      state.requestsByMessageId.delete(messageId);
-      state.requestIdsByMessageId.delete(messageId);
-      state.messageIdBySignature.delete(this.getRequestSignature(request));
-      removedMessageIds.push(messageId);
+      const openIds = requestIds.filter((id) => id !== requestID);
+      if (openIds.length > 0) {
+        state.requestIdsByMessageId.set(messageId, openIds);
+        // A prompt mid-send keeps its look until the answer lands.
+        if (!state.sendsByMessageId.has(messageId)) {
+          changes.push({ messageId, request, openCount: openIds.length, outcome: null });
+        }
+        continue;
+      }
+
+      const outcome = this.getSettledOutcome(state, messageId, request, requestID, reply, lost);
+      this.removePrompt(state, messageId, request);
+      changes.push({ messageId, request, openCount: 0, outcome });
     }
 
-    if (removedMessageIds.length > 0) {
+    if (changes.length > 0) {
       logger.debug(
-        `[PermissionManager] Removed resolved permission request: id=${requestID}, messages=${removedMessageIds.length}, pending=${state.requestsByMessageId.size}`,
+        `[PermissionManager] Settled permission request: id=${requestID}, prompts=${changes.length}, pending=${state.requestsByMessageId.size}`,
       );
     }
 
-    return removedMessageIds;
+    return changes;
+  }
+
+  /**
+   * End every prompt of a session whose answer is not on its way, and drop its waiting
+   * permissions
+   */
+  endSessionPrompts(sessionID: string, outcome: PermissionOutcome): PermissionPromptChange[] {
+    this.interactionManager.dropWaitingPermissionsForSession(sessionID);
+
+    const state = this.state;
+    if (!state) {
+      return [];
+    }
+
+    const messageIds = [...state.requestsByMessageId]
+      .filter(
+        ([messageId, request]) =>
+          request.sessionID === sessionID && !state.sendsByMessageId.has(messageId),
+      )
+      .map(([messageId]) => messageId);
+
+    return messageIds.flatMap((messageId) => this.endPrompt(messageId, outcome) ?? []);
+  }
+
+  /**
+   * Open request IDs of the prompts on screen, except prompts whose answer is on its way
+   */
+  getSettleableRequestIds(): string[] {
+    const state = this.state;
+    if (!state) {
+      return [];
+    }
+
+    return [...state.requestIdsByMessageId].flatMap(([messageId, requestIds]) =>
+      state.sendsByMessageId.has(messageId) ? [] : requestIds,
+    );
+  }
+
+  /**
+   * Check whether an OpenCode request ID is already shown or grouped behind a message
+   */
+  hasRequest(requestID: string): boolean {
+    for (const requestIds of this.state?.requestIdsByMessageId.values() ?? []) {
+      if (requestIds.includes(requestID)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whose answer settled a prompt: the one being sent from Telegram (on V2 a reject being
+   * sent settles its whole session), otherwise an answer given outside Telegram
+   */
+  private getSettledOutcome(
+    state: PermissionState,
+    messageId: number,
+    request: PermissionRequest,
+    requestID: string,
+    reply: PermissionReply | null,
+    lost: boolean,
+  ): PermissionOutcome {
+    const send = state.sendsByMessageId.get(messageId);
+    if (send?.requestIds.includes(requestID)) {
+      return { kind: "replied", reply: send.reply, outside: false };
+    }
+
+    for (const [sendingMessageId, sending] of state.sendsByMessageId) {
+      const sendingRequest = state.requestsByMessageId.get(sendingMessageId);
+      if (sending.settlesSession && sendingRequest?.sessionID === request.sessionID) {
+        return { kind: "replied", reply: "reject", outside: false };
+      }
+    }
+
+    if (lost) {
+      return { kind: "not_answered" };
+    }
+
+    return reply ? { kind: "replied", reply, outside: true } : { kind: "settled_outside" };
+  }
+
+  private removePrompt(state: PermissionState, messageId: number, request: PermissionRequest): void {
+    state.requestsByMessageId.delete(messageId);
+    state.requestIdsByMessageId.delete(messageId);
+    state.sendsByMessageId.delete(messageId);
+
+    // A newer prompt may own the signature now; only this prompt's entry goes.
+    const signature = this.getRequestSignature(request);
+    if (state.messageIdBySignature.get(signature) === messageId) {
+      state.messageIdBySignature.delete(signature);
+    }
   }
 
   isResolved(requestID: string): boolean {

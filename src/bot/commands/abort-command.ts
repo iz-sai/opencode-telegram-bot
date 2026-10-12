@@ -6,15 +6,22 @@ import { logger } from "../../utils/logger.js";
 import { t } from "../../i18n/index.js";
 import { markAttachedSessionIdle } from "../../app/services/attach-service.js";
 import { clearPromptResponseMode } from "../handlers/prompt.js";
+import { withdrawHandedOverPrompts } from "../handlers/prompt-handover.js";
 import { markUserAbortRequested } from "../../app/managers/abort-suppression-manager.js";
-import { promptQueue } from "../../app/managers/prompt-queue-manager.js";
+import { withdrawPromptQueue } from "../../app/services/prompt-inbox-service.js";
 import { promptAttachment } from "../../app/managers/prompt-attachment-manager.js";
 
 type SessionState = "idle" | "busy" | "not-found";
 
 export type AbortCommandDeps = Pick<
   AppContainer,
-  "assistantRunState" | "attachManager" | "foregroundSessionState" | "resetInteractions"
+  | "assistantRunState"
+  | "attachManager"
+  | "foregroundSessionState"
+  | "interruptSubagents"
+  | "resetInteractions"
+  | "stopBackgroundCommands"
+  | "stopBackgroundOperations"
 >;
 
 interface AbortCurrentOperationOptions {
@@ -82,7 +89,9 @@ export async function abortCurrentOperation(
 
   try {
     deps.resetInteractions("abort_command");
-    promptQueue.clear("abort_command");
+    // Awaited: a prompt still waiting in the OpenCode V2 inbox must not start a new turn
+    // once the current one is interrupted.
+    await withdrawPromptQueue("abort_command");
     // The interactions reset drops the waiting mode, so the attachment has to go with it -
     // otherwise it would ride along on the next, unrelated prompt with no confirmation left.
     promptAttachment.clear("abort_command");
@@ -96,8 +105,15 @@ export async function abortCurrentOperation(
       return;
     }
 
+    // What ran in the background stays in the chat as it was at the abort. Subagent cards
+    // wait for the answer: interrupted on success, left as they were otherwise.
+    deps.stopBackgroundCommands("abort_command", currentSession.id);
+    const leaveSubagentCards = () =>
+      deps.stopBackgroundOperations("abort_command", currentSession.id);
+
     let waitingMessageId: number | null = null;
     let chatId: number | null = null;
+    let abortConfirmed = false;
 
     if (notifyUser) {
       // No reply_markup here: this message is edited below, and Telegram
@@ -108,6 +124,7 @@ export async function abortCurrentOperation(
 
       if (!chatId) {
         logger.warn("[Abort] Chat context is missing while aborting active session");
+        leaveSubagentCards();
         return;
       }
     }
@@ -129,6 +146,7 @@ export async function abortCurrentOperation(
 
       if (abortError) {
         logger.warn("[Abort] Abort request failed:", abortError);
+        leaveSubagentCards();
         await releaseAbortBusyState(deps, currentSession.id, "abort_unconfirmed");
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
           await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_unconfirmed"));
@@ -137,6 +155,7 @@ export async function abortCurrentOperation(
       }
 
       if (abortResult !== true) {
+        leaveSubagentCards();
         await releaseAbortBusyState(deps, currentSession.id, "abort_maybe_finished");
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
           await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_maybe_finished"));
@@ -152,16 +171,26 @@ export async function abortCurrentOperation(
 
       if (finalStatus === "idle" || finalStatus === "not-found") {
         await releaseAbortBusyState(deps, currentSession.id, "abort_confirmed");
-        if (notifyUser && chatId !== null && waitingMessageId !== null) {
-          await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.success"));
+        try {
+          if (notifyUser && chatId !== null && waitingMessageId !== null) {
+            await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.success"));
+          }
+        } finally {
+          // The abort succeeded even when its reply could not be shown.
+          abortConfirmed = true;
+          deps.interruptSubagents("abort_command");
         }
       } else {
+        leaveSubagentCards();
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
           await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_still_busy"));
         }
       }
     } catch (error) {
       clearTimeout(timeoutId);
+      if (!abortConfirmed) {
+        leaveSubagentCards();
+      }
       await releaseAbortBusyState(deps, currentSession.id, "abort_error");
 
       if (error instanceof Error && error.name === "AbortError") {
@@ -185,5 +214,10 @@ export async function abortCommand(
   ctx: CommandContext<Context>,
   deps: AbortCommandDeps,
 ): Promise<void> {
+  // Only /abort itself: /start shares the abort below but leaves what /detach handed over.
+  const currentSession = getCurrentSession();
+  if (currentSession) {
+    await withdrawHandedOverPrompts(currentSession.id, "abort_command");
+  }
   await abortCurrentOperation(ctx, deps);
 }

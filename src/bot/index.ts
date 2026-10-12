@@ -6,6 +6,7 @@ import {
   configureAttachPresentation,
   restoreAttachedCurrentSession,
 } from "../app/services/attach-service.js";
+import { refreshModelViewsAfterLateCatalogSettle } from "./services/model-views.js";
 import { logger } from "../utils/logger.js";
 import { safeBackgroundTask } from "../utils/safe-background-task.js";
 import { withTelegramRateLimitRetry } from "../utils/telegram-rate-limit-retry.js";
@@ -13,7 +14,11 @@ import { telegramOutageNoticeService } from "../app/services/telegram-outage-not
 import { flushTelegramOutageNotices, isUnretriedTelegramSend } from "./telegram-outage-notices.js";
 import { LocalCommandRegistry } from "../app/services/local-command-registry.js";
 import { registerCallbackRouter } from "./callbacks/callback-router.js";
-import { initializePromptQueueDispatch } from "./handlers/prompt-queue-dispatch.js";
+import {
+  dispatchNextQueuedPrompt,
+  initializePromptQueueDispatch,
+} from "./handlers/prompt-queue-dispatch.js";
+import { initializePromptHandover } from "./handlers/prompt-handover.js";
 import { normalizeRichMessage } from "./handlers/rich-message-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { interactionGuardMiddleware } from "./middleware/interaction-guard.js";
@@ -89,6 +94,7 @@ export function createBot(
   container.setTelegramContext(bot, config.telegram.allowedUserId);
 
   initializePromptQueueDispatch({ ...container, bot });
+  initializePromptHandover({ ...container, bot }, dispatchNextQueuedPrompt);
 
   container.setReadyRestoreHandler(async (reason) => {
     const restored = await restoreAttachedCurrentSession({
@@ -97,6 +103,7 @@ export function createBot(
       chatId: config.telegram.allowedUserId,
       forceFullRestore: true,
     });
+    refreshModelViewsAfterLateCatalogSettle(container, reason);
 
     if (restored) {
       logger.info(`[Bot] Restored followed session after OpenCode ready: reason=${reason}`);

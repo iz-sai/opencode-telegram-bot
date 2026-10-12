@@ -7,6 +7,7 @@ import type { Event } from "@opencode-ai/sdk/v2";
 import { setRuntimeMode } from "../../../src/runtime/mode.js";
 import { resetSingletonState } from "../../helpers/reset-singleton-state.js";
 import { defined } from "../../helpers/defined.js";
+import { t } from "../../../src/i18n/index.js";
 import { createTestAppContainer } from "../../helpers/app-container.js";
 import type { AppContainer } from "../../../src/app/bootstrap/app-container.js";
 
@@ -181,7 +182,7 @@ function emitPermissionAsked(
 
 function emitBashTool(
   summaryAggregator: { processEvent(event: Event): void },
-  status: "running" | "completed" | "error",
+  status: "pending" | "running" | "completed" | "error",
   options: { callId?: string; command?: string } = {},
 ): void {
   const callId = options.callId ?? "call-bash";
@@ -195,13 +196,17 @@ function emitBashTool(
         type: "tool",
         callID: callId,
         tool: "bash",
-        state: {
-          status,
-          input: { command: options.command ?? "npm test" },
-          metadata: {},
-          ...(status === "completed" ? { output: "ok" } : {}),
-          ...(status === "error" ? { error: "command failed" } : {}),
-        },
+        // A pending call is still being composed: OpenCode has no arguments for it yet.
+        state:
+          status === "pending"
+            ? { status, input: {}, raw: "" }
+            : {
+                status,
+                input: { command: options.command ?? "npm test" },
+                metadata: {},
+                ...(status === "completed" ? { output: "ok" } : {}),
+                ...(status === "error" ? { error: "command failed" } : {}),
+              },
       },
     },
   } as unknown as Event);
@@ -344,6 +349,29 @@ function emitSubagentStart(
       },
     },
   } as unknown as Event);
+
+  emitSubagentModel(summaryAggregator, suffix);
+}
+
+/** The child's first assistant message: it brings the model the full card waits for. */
+function emitSubagentModel(
+  summaryAggregator: { processEvent(event: Event): void },
+  suffix = "1",
+): void {
+  summaryAggregator.processEvent({
+    type: "message.updated",
+    properties: {
+      info: {
+        id: `child-message-${suffix}`,
+        sessionID: `child-session-${suffix}`,
+        role: "assistant",
+        providerID: "openai",
+        modelID: "gpt-5.4",
+        agent: "explore",
+        time: { created: Date.now() },
+      },
+    },
+  } as unknown as Event);
 }
 
 function emitSubagentTool(summaryAggregator: { processEvent(event: Event): void }): void {
@@ -409,13 +437,48 @@ function collectSentTexts(api: FakeBotApi): string[] {
 function emitPermissionReplied(
   summaryAggregator: { processEvent(event: Event): void },
   requestID: string,
+  reply: "once" | "always" | "reject" | null = "always",
+  sessionID = "session-1",
 ): void {
   summaryAggregator.processEvent({
     type: "permission.replied",
     properties: {
-      sessionID: "session-1",
+      sessionID,
       requestID,
-      reply: "always",
+      ...(reply ? { reply } : {}),
+    },
+  } as unknown as Event);
+}
+
+function emitQuestionSettled(
+  summaryAggregator: { processEvent(event: Event): void },
+  type: "question.replied" | "question.rejected",
+  requestID: string,
+  sessionID = "session-1",
+): void {
+  summaryAggregator.processEvent({
+    type,
+    properties: { sessionID, requestID, answers: [] },
+  } as unknown as Event);
+}
+
+/** OpenCode fails the question tool when its question is dismissed. */
+function emitQuestionToolError(
+  summaryAggregator: { processEvent(event: Event): void },
+  sessionID = "session-1",
+): void {
+  summaryAggregator.processEvent({
+    type: "message.part.updated",
+    properties: {
+      part: {
+        id: "part-question",
+        sessionID,
+        messageID: "message-1",
+        type: "tool",
+        callID: "call-question",
+        tool: "question",
+        state: { status: "error", input: {}, metadata: {}, error: "dismissed" },
+      },
     },
   } as unknown as Event);
 }
@@ -423,12 +486,13 @@ function emitPermissionReplied(
 function emitQuestionAsked(
   summaryAggregator: { processEvent(event: Event): void },
   requestID: string,
+  sessionID = "session-1",
 ): void {
   summaryAggregator.processEvent({
     type: "question.asked",
     properties: {
       id: requestID,
-      sessionID: "session-1",
+      sessionID,
       questions: [
         {
           header: "Pick",
@@ -442,7 +506,10 @@ function emitQuestionAsked(
 
 describe("bot/services/event-subscription-service", () => {
   let tempHome: string;
-  let activeService: { cleanup(reason: string): void } | null = null;
+  let activeService: {
+    cleanup(reason: string): void;
+    stopBackgroundOperations(reason: string, sessionId?: string): void;
+  } | null = null;
   let activeContainer: AppContainer;
 
   beforeEach(async () => {
@@ -1093,6 +1160,62 @@ describe("bot/services/event-subscription-service", () => {
       );
     });
 
+    function emitAbortError(summaryAggregator: { processEvent(event: Event): void }): void {
+      summaryAggregator.processEvent({
+        type: "session.error",
+        properties: {
+          sessionID: "session-1",
+          error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+        },
+      } as unknown as Event);
+    }
+
+    it("ends a running subagent card interrupted, in place, when the run is stopped", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      let nextMessageId = 500;
+      api.sendMessage.mockImplementation(async () => ({ message_id: nextMessageId++ }));
+
+      useTrackerFakeTimers();
+      emitSubagentStart(summaryAggregator);
+      emitSubagentModel(summaryAggregator);
+      emitSubagentTool(summaryAggregator);
+      await flushPendingDispatch();
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      emitAbortError(summaryAggregator);
+      await flushPendingDispatch();
+
+      const cardSends = api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("🧩"));
+      expect(cardSends).toHaveLength(1);
+      const cardMessageId = (await api.sendMessage.mock.results[
+        api.sendMessage.mock.calls.indexOf(cardSends[0]!)
+      ]?.value)?.message_id;
+      const lastCardText = String(
+        api.editMessageText.mock.calls.filter((call) => call[1] === cardMessageId).at(-1)?.[2],
+      );
+      expect(lastCardText.split("\n").at(-1)).toMatch(/^⏹ Interrupted · 🕒 \d+s$/);
+
+      const sentBefore = collectSentTexts(api).length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(collectSentTexts(api)).toHaveLength(sentBefore);
+    });
+
+    it("drops the running mark of a foreground line when OpenCode V1 stops the run", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+
+      useTrackerFakeTimers();
+      emitBashTool(summaryAggregator, "running");
+      await vi.advanceTimersByTimeAsync(ELAPSED_SETTLE_MS);
+
+      emitAbortError(summaryAggregator);
+      await flushPendingDispatch();
+
+      const lastText = collectSentTexts(api).filter((text) => text.includes("npm test")).at(-1);
+      expect(lastText).toBeDefined();
+      expect(lastText).not.toContain("⏳");
+      expect(lastText).toContain("· 🕒 29s");
+    });
+
     it("sends overlapping subagents as independent card messages", async () => {
       const { api, summaryAggregator } = await setupService(false);
 
@@ -1114,6 +1237,200 @@ describe("bot/services/event-subscription-service", () => {
       expect(cardMessages.every((text) => !(text.includes("inspect task 1") && text.includes("inspect task 2")))).toBe(
         true,
       );
+    });
+
+    it("sends a starting line until the model is known, then edits it into the full card", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      let nextMessageId = 500;
+      api.sendMessage.mockImplementation(async () => ({ message_id: nextMessageId++ }));
+
+      useTrackerFakeTimers();
+      summaryAggregator.processEvent({
+        type: "session.created",
+        properties: {
+          info: {
+            id: "child-session-1",
+            parentID: "session-1",
+            title: "inspect task 1 (@explore subagent)",
+            slug: "child-1",
+            directory: "D:/repo",
+            projectID: "p1",
+            version: "1",
+            time: { created: Date.now(), updated: Date.now() },
+          },
+        },
+      } as unknown as Event);
+      await flushPendingDispatch();
+
+      const cardSends = api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("🧩"));
+      expect(cardSends.map((call) => String(call[1]))).toEqual(["🧩 Starting task: inspect task 1"]);
+
+      emitSubagentModel(summaryAggregator);
+      await flushPendingDispatch();
+
+      const cardMessageId = (await api.sendMessage.mock.results[
+        api.sendMessage.mock.calls.indexOf(cardSends[0]!)
+      ]?.value)?.message_id;
+      const cardEdits = api.editMessageText.mock.calls.filter((call) => call[1] === cardMessageId);
+      expect(api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("🧩"))).toHaveLength(1);
+      expect(String(cardEdits.at(-1)?.[2])).toBe(
+        "🧩 Task: inspect task 1\nAgent: explore\nModel: openai/gpt-5.4\n\n⚙️ Working...",
+      );
+      expect(collectSentTexts(api).some((text) => text.includes("Unknown"))).toBe(false);
+    });
+  });
+
+  describe("a tool line waits for its arguments", () => {
+    /** A bash line or card naming the tool without its command. */
+    function hasBareBashLine(api: FakeBotApi): boolean {
+      return collectSentTexts(api).some((text) => /💻 bash\s*(?:$|\n|·)/.test(text));
+    }
+
+    async function setupCompact(): Promise<Awaited<ReturnType<typeof setupService>>> {
+      const setup = await setupService(false);
+      const settingsStore = await import("../../../src/app/stores/settings-store.js");
+      settingsStore.setCompactOutputMode(true);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      useTrackerFakeTimers();
+      return setup;
+    }
+
+    it("shows nothing while a call is composed and its full line once it runs", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitBashTool(summaryAggregator, "pending");
+      await flushPendingDispatch();
+      expect(collectSentTexts(api)).toEqual([]);
+
+      emitBashTool(summaryAggregator, "running", { command: "sleep 60" });
+      await flushPendingDispatch();
+      expect(String(api.sendMessage.mock.calls[0]?.[1])).toContain("⏳ 💻 bash sleep 60");
+
+      emitBashTool(summaryAggregator, "completed", { command: "sleep 60" });
+      await flushPendingDispatch();
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(collectSentTexts(api).pop()).toContain("💻 bash sleep 60");
+      expect(hasBareBashLine(api)).toBe(false);
+    });
+
+    it("does not tick a call still being composed and times it from its first event", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitBashTool(summaryAggregator, "pending");
+      await vi.advanceTimersByTimeAsync(ELAPSED_SETTLE_MS);
+      expect(collectSentTexts(api)).toEqual([]);
+
+      emitBashTool(summaryAggregator, "running", { command: "sleep 60" });
+      await flushPendingDispatch();
+
+      const firstLine = String(api.sendMessage.mock.calls[0]?.[1]);
+      expect(firstLine).toContain("⏳ 💻 bash sleep 60");
+      expect(firstLine).toMatch(/· 🕒 \d+s/);
+      expect(hasBareBashLine(api)).toBe(false);
+    });
+
+    it("shows a call that fails while composed as one finished line", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitBashTool(summaryAggregator, "pending");
+      await flushPendingDispatch();
+      emitBashTool(summaryAggregator, "error");
+      await flushPendingDispatch();
+
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(collectSentTexts(api).some((text) => text.includes("⏳"))).toBe(false);
+    });
+
+    it("still shows a running tool that has no arguments at all", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitBareTool(summaryAggregator, "running", "call-bare");
+      await flushPendingDispatch();
+
+      expect(collectSentTexts(api).some((text) => text.includes("⏳ 🛠️ unknown_tool"))).toBe(true);
+    });
+
+    it("keeps the compact card on the running call while the next one is composed", async () => {
+      const { api, summaryAggregator } = await setupCompact();
+
+      emitBashTool(summaryAggregator, "running", { callId: "call-1", command: "sleep 90" });
+      await flushPendingDispatch();
+      emitBashTool(summaryAggregator, "pending", { callId: "call-2" });
+      await flushPendingDispatch();
+      expect(collectSentTexts(api).pop()).toContain("sleep 90");
+
+      emitBashTool(summaryAggregator, "running", { callId: "call-2", command: "npm test" });
+      await flushPendingDispatch();
+      expect(collectSentTexts(api).pop()).toContain("npm test");
+      expect(hasBareBashLine(api)).toBe(false);
+    });
+
+    it("does not hand the compact card to a composed call when a sibling finishes", async () => {
+      const { api, summaryAggregator } = await setupCompact();
+
+      emitReadTool(summaryAggregator, "running", { callId: "call-read", filePath: "README.md" });
+      await flushPendingDispatch();
+      emitBashTool(summaryAggregator, "pending", { callId: "call-2" });
+      emitReadTool(summaryAggregator, "completed", { callId: "call-read", filePath: "README.md" });
+      await flushPendingDispatch();
+      expect(hasBareBashLine(api)).toBe(false);
+
+      emitBashTool(summaryAggregator, "running", { callId: "call-2", command: "npm test" });
+      await flushPendingDispatch();
+      expect(collectSentTexts(api).pop()).toContain("npm test");
+      expect(hasBareBashLine(api)).toBe(false);
+    });
+
+    it("closes the card above a reply on a composed call and opens the next one once it runs", async () => {
+      const { api, summaryAggregator } = await setupCompact();
+
+      emitBashTool(summaryAggregator, "running", { callId: "call-1", command: "Get-ChildItem" });
+      emitBashTool(summaryAggregator, "completed", { callId: "call-1", command: "Get-ChildItem" });
+      await flushPendingDispatch();
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await flushPendingDispatch();
+      emitBashTool(summaryAggregator, "pending", { callId: "call-2" });
+      await flushPendingDispatch();
+
+      const workingCards = (): string[] =>
+        api.sendMessage.mock.calls
+          .map((call) => String(call[1]))
+          .filter((text) => text.includes("⏳ Working"));
+      expect(collectSentTexts(api).some((text) => text.includes("✅ Finished Work"))).toBe(true);
+      expect(workingCards()).toHaveLength(1);
+
+      emitBashTool(summaryAggregator, "running", { callId: "call-2", command: "Get-Content" });
+      await flushPendingDispatch();
+      expect(workingCards()).toHaveLength(2);
+      expect(workingCards()[1]).toContain("Get-Content");
+      expect(hasBareBashLine(api)).toBe(false);
+    });
+
+    it("leaves the compact card as it was when a composed call fails", async () => {
+      const { api, summaryAggregator } = await setupCompact();
+
+      emitBashTool(summaryAggregator, "running", { callId: "call-1", command: "sleep 90" });
+      await flushPendingDispatch();
+      emitBashTool(summaryAggregator, "pending", { callId: "call-2" });
+      emitBashTool(summaryAggregator, "error", { callId: "call-2" });
+      await flushPendingDispatch();
+
+      expect(collectSentTexts(api).pop()).toContain("sleep 90");
+      expect(hasBareBashLine(api)).toBe(false);
+    });
+
+    it("opens no compact card for a call that fails while composed", async () => {
+      const { api, summaryAggregator } = await setupCompact();
+
+      emitBashTool(summaryAggregator, "pending");
+      emitBashTool(summaryAggregator, "error");
+      await flushPendingDispatch();
+
+      expect(collectSentTexts(api).some((text) => text.includes("⏳ Working"))).toBe(false);
     });
   });
 
@@ -1395,6 +1712,268 @@ describe("bot/services/event-subscription-service", () => {
       emitThinkingPart(summaryAggregator, "planning");
       await flushPendingDispatch();
       emitSessionIdle(summaryAggregator);
+      await flushPendingDispatch();
+
+      expect(collectSentTexts(api).some((text) => text.includes("✅ Finished Work"))).toBe(true);
+    });
+  });
+
+  describe("background operations", () => {
+    function emitBackgroundBash(
+      summaryAggregator: { processEvent(event: Event): void },
+      status: "running" | "completed",
+    ): void {
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-call-bg",
+            sessionID: "session-1",
+            messageID: "message-1",
+            type: "tool",
+            callID: "call-bg",
+            tool: "bash",
+            state: {
+              status,
+              input: { command: "sleep 90", background: true },
+              metadata: {},
+              ...(status === "completed" ? { output: "ok" } : {}),
+            },
+          },
+        },
+      } as unknown as Event);
+    }
+
+    /** Launches a background command, then replies and ends the turn. */
+    async function launchAndEndTurn(
+      api: FakeBotApi,
+      summaryAggregator: { processEvent(event: Event): void },
+    ): Promise<number> {
+      let nextMessageId = 100;
+      api.sendMessage.mockImplementation(async () => ({ message_id: nextMessageId++ }));
+
+      useTrackerFakeTimers();
+      emitBackgroundBash(summaryAggregator, "running");
+      await flushPendingDispatch();
+      const lineMessageId = nextMessageId - 1;
+      emitAssistantTextPart(summaryAggregator, "started");
+      emitAssistantCompleted(summaryAggregator);
+      await flushPendingDispatch();
+      emitSessionIdle(summaryAggregator);
+      await flushPendingDispatch();
+      return lineMessageId;
+    }
+
+    async function useCompactMode(): Promise<void> {
+      const settingsStore = await import("../../../src/app/stores/settings-store.js");
+      settingsStore.setCompactOutputMode(true);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    it("keeps counting a background command after the turn and finishes its line in place", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      const lineMessageId = await launchAndEndTurn(api, summaryAggregator);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      const running = api.editMessageText.mock.calls.filter((call) => call[1] === lineMessageId);
+      expect(String(running.at(-1)?.[2])).toMatch(/⏳ .*sleep 90 · 🕒 \d+[ms]/);
+
+      emitBackgroundBash(summaryAggregator, "completed");
+      await flushPendingDispatch();
+
+      const finished = api.editMessageText.mock.calls.filter((call) => call[1] === lineMessageId);
+      const finalLine = String(finished.at(-1)?.[2]);
+      expect(finalLine).toContain("sleep 90");
+      expect(finalLine).toMatch(/· 🕒 \d+[ms]/);
+      expect(finalLine).not.toContain("⏳");
+    });
+
+    it("leaves the line as it was when background operations are stopped", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      await launchAndEndTurn(api, summaryAggregator);
+      await vi.advanceTimersByTimeAsync(25_000);
+
+      activeService?.stopBackgroundOperations("test", "session-1");
+      await flushPendingDispatch();
+      const textsBefore = collectSentTexts(api).length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      emitBackgroundBash(summaryAggregator, "completed");
+      await flushPendingDispatch();
+
+      expect(collectSentTexts(api).slice(textsBefore)).toEqual([]);
+    });
+
+    it("keeps a background subagent's card live after the turn and completes it in place", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      let nextMessageId = 100;
+      api.sendMessage.mockImplementation(async () => ({ message_id: nextMessageId++ }));
+
+      useTrackerFakeTimers();
+      emitSubagentStart(summaryAggregator);
+      summaryAggregator.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-call-task",
+            sessionID: "session-1",
+            messageID: "message-1",
+            type: "tool",
+            callID: "call-task",
+            tool: "task",
+            state: {
+              status: "running",
+              input: { description: "inspect task 1", background: true },
+              metadata: { sessionId: "child-session-1" },
+            },
+          },
+        },
+      } as unknown as Event);
+      await flushPendingDispatch();
+      const cardMessageId = nextMessageId - 1;
+      emitAssistantTextPart(summaryAggregator, "launched");
+      emitAssistantCompleted(summaryAggregator);
+      emitSessionIdle(summaryAggregator);
+      await flushPendingDispatch();
+
+      emitSubagentTool(summaryAggregator);
+      await vi.advanceTimersByTimeAsync(25_000);
+      const cardEdits = () =>
+        api.editMessageText.mock.calls
+          .filter((call) => call[1] === cardMessageId)
+          .map((call) => String(call[2]));
+      expect(cardEdits().at(-1)).toMatch(/npm run lint · 🕒 \d+s/);
+
+      summaryAggregator.processEvent({
+        type: "session.idle",
+        properties: { sessionID: "child-session-1" },
+      } as unknown as Event);
+      await flushPendingDispatch();
+      expect(cardEdits().at(-1)).toMatch(/✅ Completed · 🕒/);
+    });
+
+    it("keeps a parent card on its background nested launch past the turn, then ends it in place", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      let nextMessageId = 100;
+      api.sendMessage.mockImplementation(async () => ({ message_id: nextMessageId++ }));
+      const emitLaunch = (status: "running" | "completed") =>
+        summaryAggregator.processEvent({
+          type: "message.part.updated",
+          properties: {
+            part: {
+              id: "child-launch",
+              sessionID: "child-session-1",
+              messageID: "child-message-1",
+              type: "tool",
+              callID: "call-nested",
+              tool: "task",
+              state: {
+                status,
+                input: { description: "Count Kotlin files", prompt: "Count", background: true },
+                metadata: { sessionId: "nested-session-1" },
+              },
+            },
+          },
+        } as unknown as Event);
+
+      useTrackerFakeTimers();
+      emitSubagentStart(summaryAggregator);
+      emitLaunch("running");
+      summaryAggregator.processEvent({
+        type: "session.created",
+        properties: {
+          info: {
+            id: "nested-session-1",
+            parentID: "child-session-1",
+            title: "Count Kotlin files (@general subagent)",
+            slug: "nested",
+            directory: "D:/repo",
+            projectID: "p1",
+            version: "1",
+            time: { created: Date.now(), updated: Date.now() },
+          },
+        },
+      } as unknown as Event);
+      await flushPendingDispatch();
+      const cardMessageId = nextMessageId - 1;
+      summaryAggregator.processEvent({
+        type: "session.idle",
+        properties: { sessionID: "child-session-1" },
+      } as unknown as Event);
+      emitAssistantTextPart(summaryAggregator, "delegated");
+      emitAssistantCompleted(summaryAggregator);
+      emitSessionIdle(summaryAggregator);
+      await flushPendingDispatch();
+
+      await vi.advanceTimersByTimeAsync(25_000);
+      const cardEdits = () =>
+        api.editMessageText.mock.calls
+          .filter((call) => call[1] === cardMessageId)
+          .map((call) => String(call[2]));
+      expect(cardEdits().at(-1)).toMatch(/🤖 Running Task · 🕒 \d+s$/);
+
+      emitLaunch("completed");
+      await flushPendingDispatch();
+      expect(cardEdits().at(-1)).toMatch(/✅ Completed · 🕒/);
+      expect(collectSentTexts(api).some((text) => text.includes("Count Kotlin files"))).toBe(false);
+    });
+
+    it("stops a background command once its session is no longer current", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      const sessionService = await import("../../../src/app/services/session-service.js");
+      await launchAndEndTurn(api, summaryAggregator);
+
+      sessionService.setCurrentSession({ id: "session-2", title: "Other", directory: "D:/repo" });
+      await vi.advanceTimersByTimeAsync(30_000);
+      sessionService.setCurrentSession({ id: "session-1", title: "Test session", directory: "D:/repo" });
+      const textsBefore = collectSentTexts(api).length;
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(collectSentTexts(api)).toHaveLength(textsBefore);
+    });
+
+    it("stops background operations when the event stream reconnects", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      await launchAndEndTurn(api, summaryAggregator);
+      const onReconnect = mocked.subscribeToEvents.mock.calls[0]?.[2] as (info: {
+        serverRestarted: boolean | null;
+      }) => void;
+
+      onReconnect({ serverRestarted: null });
+      const textsBefore = collectSentTexts(api).length;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(collectSentTexts(api)).toHaveLength(textsBefore);
+    });
+
+    it("keeps the compact card working past the reply and closes it when the command ends", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      await useCompactMode();
+      await launchAndEndTurn(api, summaryAggregator);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      const texts = collectSentTexts(api);
+      expect(texts.some((text) => text.includes("✅ Finished Work"))).toBe(false);
+      expect(texts.at(-1)).toMatch(/⏳ Working[\s\S]*sleep 90 · 🕒 \d+[ms]/);
+
+      emitBackgroundBash(summaryAggregator, "completed");
+      await flushPendingDispatch();
+
+      const finished = collectSentTexts(api).filter((text) => text.includes("✅ Finished Work"));
+      expect(finished).toHaveLength(1);
+      expect(finished[0]).toContain("tool calls: 1");
+    });
+
+    it("keeps the parked compact card through a session error in a later turn", async () => {
+      const { api, summaryAggregator } = await setupService(false, { startAssistantRun: true });
+      await useCompactMode();
+      await launchAndEndTurn(api, summaryAggregator);
+
+      summaryAggregator.processEvent({
+        type: "session.error",
+        properties: { sessionID: "session-1", error: { name: "UnknownError", data: { message: "boom" } } },
+      } as unknown as Event);
+      await flushPendingDispatch();
+      emitBackgroundBash(summaryAggregator, "completed");
       await flushPendingDispatch();
 
       expect(collectSentTexts(api).some((text) => text.includes("✅ Finished Work"))).toBe(true);
@@ -1762,7 +2341,11 @@ describe("bot/services/event-subscription-service", () => {
     });
   });
 
-  it("clears permission prompts when OpenCode resolves pending requests", async () => {
+  function findEdit(api: FakeBotApi, messageId: number): unknown[] | undefined {
+    return api.editMessageText.mock.calls.find((call) => call[1] === messageId);
+  }
+
+  it("ends permission prompts with the outcome OpenCode reports", async () => {
     const { api, summaryAggregator } = await setupService(true);
     const { permissionManager, interactionManager } = activeContainer;
     api.sendMessage
@@ -1781,17 +2364,69 @@ describe("bot/services/event-subscription-service", () => {
     await vi.waitFor(() => {
       expect(permissionManager.getPendingCount()).toBe(1);
     });
-    expect(api.deleteMessage).toHaveBeenCalledWith(42, 501);
+    const outside = `${t("permission.outcome.always")}${t("permission.outcome.outside_suffix")}`;
+    const edit = defined(findEdit(api, 501));
+    expect(String(edit[2])).toContain("• D:/other/*");
+    expect(String(edit[2]).endsWith(`\n${outside}`)).toBe(true);
+    expect(edit[3]).toBeUndefined();
+    expect(api.deleteMessage).not.toHaveBeenCalled();
     expect(permissionManager.getRequestID(500)).toBe("permission-1");
     expect(interactionManager.getSnapshot()?.metadata.pendingCount).toBe(1);
 
-    emitPermissionReplied(summaryAggregator, "permission-1");
+    emitPermissionReplied(summaryAggregator, "permission-1", null);
 
     await vi.waitFor(() => {
       expect(permissionManager.isActive()).toBe(false);
       expect(interactionManager.getSnapshot()).toBeNull();
     });
-    expect(api.deleteMessage).toHaveBeenCalledWith(42, 500);
+    expect(
+      String(defined(findEdit(api, 500))[2]).endsWith(`\n${t("permission.outcome.settled_outside")}`),
+    ).toBe(true);
+  });
+
+  it("ends the prompts on screen as not answered on a reset", async () => {
+    const { api, summaryAggregator } = await setupService(true);
+    const { permissionManager, interactionManager } = activeContainer;
+    api.sendMessage.mockResolvedValueOnce({ message_id: 520 });
+
+    emitPermissionAsked(summaryAggregator, "permission-1");
+    await vi.waitFor(() => {
+      expect(permissionManager.getPendingCount()).toBe(1);
+    });
+
+    interactionManager.reset("abort_command");
+
+    await vi.waitFor(() => {
+      expect(findEdit(api, 520)).toBeDefined();
+    });
+    const edit = defined(findEdit(api, 520));
+    expect(String(edit[2]).endsWith(`\n${t("permission.outcome.not_answered")}`)).toBe(true);
+    expect(edit[3]).toBeUndefined();
+
+    // OpenCode's own rejection that follows the abort changes nothing.
+    emitPermissionReplied(summaryAggregator, "permission-1", "reject");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(api.editMessageText.mock.calls.filter((call) => call[1] === 520)).toHaveLength(1);
+  });
+
+  it("ends a session's prompts as not answered when its run ends", async () => {
+    const { api, summaryAggregator } = await setupService(true);
+    const { permissionManager } = activeContainer;
+    api.sendMessage.mockResolvedValueOnce({ message_id: 530 });
+
+    emitPermissionAsked(summaryAggregator, "permission-1");
+    await vi.waitFor(() => {
+      expect(permissionManager.getPendingCount()).toBe(1);
+    });
+
+    emitSessionIdle(summaryAggregator);
+
+    await vi.waitFor(() => {
+      expect(permissionManager.isActive()).toBe(false);
+    });
+    expect(
+      String(defined(findEdit(api, 530))[2]).endsWith(`\n${t("permission.outcome.not_answered")}`),
+    ).toBe(true);
   });
 
   it("discards a permission prompt resolved while its Telegram message is being sent", async () => {
@@ -1969,6 +2604,402 @@ describe("bot/services/event-subscription-service", () => {
     expect(permissionManager.getPendingCount()).toBe(1);
   });
 
+  describe("subagent questions and polls settled outside Telegram", () => {
+    function pollEdits(api: FakeBotApi, messageId: number): string[] {
+      return api.editMessageText.mock.calls
+        .filter((call) => call[1] === messageId)
+        .map((call) => JSON.stringify(call));
+    }
+
+    it("shows a subagent's question in the followed chat", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      const { questionManager } = getInteractionManagers();
+
+      emitSubagentStart(summaryAggregator);
+      emitQuestionAsked(summaryAggregator, "question-child", "child-session-1");
+
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).not.toBeNull();
+      });
+      expect(questionManager.getRequestID()).toBe("question-child");
+      expect(questionManager.getSessionId()).toBe("child-session-1");
+      expect(JSON.stringify(api.sendMessage.mock.calls)).toContain("Which option for question-child?");
+    });
+
+    it("ignores a question from a session the chat does not follow", async () => {
+      const { summaryAggregator } = await setupService(true);
+      const { questionManager, interactionManager } = getInteractionManagers();
+
+      emitQuestionAsked(summaryAggregator, "question-other", "other-session");
+      await settle();
+
+      expect(questionManager.isActive()).toBe(false);
+      expect(interactionManager.getWaitingKind()).toBeNull();
+    });
+
+    it("queues a poll of another session and shows it once the first is settled outside Telegram", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      const { questionManager, interactionManager } = getInteractionManagers();
+      let nextMessageId = 700;
+      api.sendMessage.mockImplementation(async () => ({ message_id: nextMessageId++ }));
+
+      emitSubagentStart(summaryAggregator, "1");
+      emitSubagentStart(summaryAggregator, "2");
+      emitQuestionAsked(summaryAggregator, "question-a", "child-session-1");
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).not.toBeNull();
+      });
+      const firstPollMessageId = questionManager.getActiveMessageId() ?? 0;
+
+      emitQuestionAsked(summaryAggregator, "question-b", "child-session-2");
+      await vi.waitFor(() => {
+        expect(interactionManager.getWaitingQuestionRequestIds()).toEqual(["question-b"]);
+      });
+      expect(questionManager.getRequestID()).toBe("question-a");
+
+      emitQuestionSettled(summaryAggregator, "question.replied", "question-a", "child-session-1");
+
+      await vi.waitFor(() => {
+        expect(questionManager.getRequestID()).toBe("question-b");
+        expect(questionManager.getActiveMessageId()).not.toBeNull();
+      });
+      const closed = pollEdits(api, firstPollMessageId);
+      expect(closed).toHaveLength(1);
+      expect(closed[0]).toContain(t("question.settled_outside.answered"));
+      expect(closed[0]).not.toContain("reply_markup");
+      expect(api.deleteMessage).not.toHaveBeenCalledWith(42, firstPollMessageId);
+    });
+
+    it("closes a poll cancelled outside Telegram", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      const { questionManager } = getInteractionManagers();
+      api.sendMessage.mockResolvedValueOnce({ message_id: 720 });
+
+      emitQuestionAsked(summaryAggregator, "question-1");
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).toBe(720);
+      });
+
+      emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+
+      await vi.waitFor(() => {
+        expect(questionManager.isActive()).toBe(false);
+      });
+      expect(pollEdits(api, 720)[0]).toContain(t("question.settled_outside.cancelled"));
+    });
+
+    it("keeps a poll cancelled outside Telegram when the question tool fails right after", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      const { questionManager } = getInteractionManagers();
+      api.sendMessage.mockResolvedValueOnce({ message_id: 721 });
+
+      emitQuestionAsked(summaryAggregator, "question-1");
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).toBe(721);
+      });
+      // The edit takes a network round trip: the tool error lands while it is on its way.
+      api.editMessageText.mockImplementation(
+        () => new Promise((resolve) => setTimeout(() => resolve(true), 10)),
+      );
+
+      emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+      emitQuestionToolError(summaryAggregator);
+      await settle();
+
+      expect(questionManager.isActive()).toBe(false);
+      expect(pollEdits(api, 721)[0]).toContain(t("question.settled_outside.cancelled"));
+      expect(api.deleteMessage).not.toHaveBeenCalledWith(42, 721);
+    });
+
+    it("leaves a poll whose Cancel is on its way to the dismissal", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      const { questionManager } = getInteractionManagers();
+      api.sendMessage.mockResolvedValueOnce({ message_id: 722 });
+
+      emitQuestionAsked(summaryAggregator, "question-1");
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).toBe(722);
+      });
+      questionManager.startDismissal();
+
+      emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+      emitQuestionToolError(summaryAggregator);
+      await settle();
+
+      expect(questionManager.isActive()).toBe(true);
+      expect(questionManager.getSettledWhileSending()).toBe("cancelled");
+      expect(pollEdits(api, 722)).toHaveLength(0);
+      expect(api.deleteMessage).not.toHaveBeenCalledWith(42, 722);
+    });
+
+    it("ends a poll whose Cancel was reported lost as cancelled once OpenCode reports it", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      const { questionManager } = getInteractionManagers();
+      api.sendMessage.mockResolvedValueOnce({ message_id: 723 });
+
+      emitQuestionAsked(summaryAggregator, "question-1");
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).toBe(723);
+      });
+      questionManager.startDismissal();
+      questionManager.failDismissal();
+      api.editMessageText.mockImplementation(
+        () => new Promise((resolve) => setTimeout(() => resolve(true), 10)),
+      );
+
+      emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+      emitQuestionToolError(summaryAggregator);
+      await settle();
+
+      expect(questionManager.isActive()).toBe(false);
+      expect(api.editMessageText).toHaveBeenCalledWith(42, 723, t("question.cancelled"));
+      expect(api.deleteMessage).not.toHaveBeenCalledWith(42, 723);
+    });
+
+    it("leaves a poll answered from Telegram to its own summary", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      const { questionManager } = getInteractionManagers();
+      api.sendMessage.mockResolvedValueOnce({ message_id: 730 });
+
+      emitQuestionAsked(summaryAggregator, "question-1");
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).toBe(730);
+      });
+      questionManager.startAnswer();
+
+      emitQuestionSettled(summaryAggregator, "question.replied", "question-1");
+      await settle();
+
+      expect(questionManager.isActive()).toBe(true);
+      expect(pollEdits(api, 730)).toHaveLength(0);
+    });
+
+    it("drops a waiting poll settled outside Telegram", async () => {
+      const { summaryAggregator } = await setupService(true);
+      const { permissionManager, interactionManager } = getInteractionManagers();
+
+      emitPermissionAsked(summaryAggregator, "permission-1");
+      await vi.waitFor(() => {
+        expect(permissionManager.getPendingCount()).toBe(1);
+      });
+      emitQuestionAsked(summaryAggregator, "question-1");
+      await vi.waitFor(() => {
+        expect(interactionManager.getWaitingKind()).toBe("question");
+      });
+
+      emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+
+      await vi.waitFor(() => {
+        expect(interactionManager.getWaitingKind()).toBeNull();
+      });
+      expect(permissionManager.getPendingCount()).toBe(1);
+    });
+
+    it("keeps a subagent's poll when the followed session's question tool fails", async () => {
+      const { summaryAggregator } = await setupService(true);
+      const { questionManager } = getInteractionManagers();
+
+      emitSubagentStart(summaryAggregator);
+      emitQuestionAsked(summaryAggregator, "question-child", "child-session-1");
+      await vi.waitFor(() => {
+        expect(questionManager.getActiveMessageId()).not.toBeNull();
+      });
+
+      const aggregator = summaryAggregator as unknown as {
+        onQuestionErrorCallback: (sessionId: string) => void;
+      };
+      aggregator.onQuestionErrorCallback("session-1");
+      await settle();
+
+      expect(questionManager.getRequestID()).toBe("question-child");
+    });
+
+    describe("polls whose question ends before they reach the chat", () => {
+      /** Holds the messages before the next poll, as a Telegram rate limit would. */
+      function holdMessagesBeforePoll(): () => void {
+        const runtime = (activeService as unknown as {
+          runtime: { letOutReplies(sessionId: string): Promise<void> };
+        }).runtime;
+        let release: () => void = () => {};
+        vi.spyOn(runtime, "letOutReplies").mockReturnValueOnce(
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        );
+        return () => release();
+      }
+
+      /** Holds the next message the bot sends until released. */
+      function holdNextSend(api: FakeBotApi, messageId: number): () => void {
+        let release: () => void = () => {};
+        api.sendMessage.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              release = () => resolve({ message_id: messageId });
+            }),
+        );
+        return () => release();
+      }
+
+      function pollTextSent(api: FakeBotApi, requestID: string): boolean {
+        return JSON.stringify(api.sendMessage.mock.calls).includes(`Which option for ${requestID}?`);
+      }
+
+      it("never shows a poll whose question was cancelled while the messages before it went out", async () => {
+        const { api, summaryAggregator } = await setupService(true);
+        const { questionManager } = getInteractionManagers();
+        const release = holdMessagesBeforePoll();
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await settle();
+        emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+        await settle();
+        release();
+        await settle();
+
+        expect(pollTextSent(api, "question-1")).toBe(false);
+        expect(questionManager.isActive()).toBe(false);
+      });
+
+      it("never shows a poll whose run was reset while the messages before it went out", async () => {
+        const { api, summaryAggregator } = await setupService(true);
+        const { questionManager, interactionManager } = getInteractionManagers();
+        const release = holdMessagesBeforePoll();
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await settle();
+        interactionManager.reset("abort_command");
+        release();
+        await settle();
+
+        expect(pollTextSent(api, "question-1")).toBe(false);
+        expect(questionManager.isActive()).toBe(false);
+      });
+
+      it("still shows a pending poll when only a permission clear moved the generation", async () => {
+        const { summaryAggregator } = await setupService(true);
+        const { questionManager, interactionManager } = getInteractionManagers();
+        const release = holdMessagesBeforePoll();
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await settle();
+        interactionManager.bumpGeneration();
+        release();
+
+        await vi.waitFor(() => {
+          expect(questionManager.getActiveMessageId()).not.toBeNull();
+        });
+        expect(questionManager.getRequestID()).toBe("question-1");
+      });
+
+      it("closes a poll that lands after its question was cancelled outside Telegram", async () => {
+        const { api, summaryAggregator } = await setupService(true);
+        const { questionManager } = getInteractionManagers();
+        const release = holdNextSend(api, 760);
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await vi.waitFor(() => {
+          expect(questionManager.getRequestID()).toBe("question-1");
+        });
+        emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+        await settle();
+        release();
+        await settle();
+
+        const edits = pollEdits(api, 760);
+        expect(edits).toHaveLength(1);
+        expect(edits[0]).toContain(t("question.settled_outside.cancelled"));
+        expect(edits[0]).not.toContain("reply_markup");
+        expect(questionManager.isActive()).toBe(false);
+      });
+
+      it("keeps the first ending when a reset comes before OpenCode's own cancel", async () => {
+        const { api, summaryAggregator } = await setupService(true);
+        const { questionManager, interactionManager } = getInteractionManagers();
+        const release = holdNextSend(api, 761);
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await vi.waitFor(() => {
+          expect(questionManager.getRequestID()).toBe("question-1");
+        });
+        interactionManager.reset("abort_command");
+        emitQuestionSettled(summaryAggregator, "question.rejected", "question-1");
+        await settle();
+        release();
+        await settle();
+
+        const edits = pollEdits(api, 761);
+        expect(edits).toHaveLength(1);
+        expect(edits[0]).toContain(t("question.not_answered"));
+        expect(questionManager.isActive()).toBe(false);
+      });
+
+      it("ends a poll that lands after its run ended and frees the slot", async () => {
+        const { api, summaryAggregator } = await setupService(true);
+        const { questionManager, interactionManager } = getInteractionManagers();
+        const release = holdNextSend(api, 762);
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await vi.waitFor(() => {
+          expect(questionManager.getRequestID()).toBe("question-1");
+        });
+        const aggregator = summaryAggregator as unknown as {
+          onSessionRunEndedCallback: (sessionId: string) => Promise<void>;
+        };
+        await aggregator.onSessionRunEndedCallback("session-1");
+        release();
+        await settle();
+
+        const edits = pollEdits(api, 762);
+        expect(edits).toHaveLength(1);
+        expect(edits[0]).toContain(t("question.not_answered"));
+        expect(interactionManager.getSnapshot()).toBeNull();
+      });
+
+      it("deletes a poll that lands after a newer poll of its session replaced it", async () => {
+        const { api, summaryAggregator } = await setupService(true);
+        const { questionManager } = getInteractionManagers();
+        const release = holdNextSend(api, 763);
+        api.sendMessage.mockResolvedValueOnce({ message_id: 764 });
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await vi.waitFor(() => {
+          expect(questionManager.getRequestID()).toBe("question-1");
+        });
+        emitQuestionAsked(summaryAggregator, "question-2");
+        await vi.waitFor(() => {
+          expect(questionManager.getActiveMessageId()).toBe(764);
+        });
+        release();
+
+        await vi.waitFor(() => {
+          expect(api.deleteMessage).toHaveBeenCalledWith(42, 763);
+        });
+        expect(questionManager.getRequestID()).toBe("question-2");
+        expect(pollEdits(api, 763)).toHaveLength(0);
+      });
+
+      it("ends a poll on screen as not answered when a reset drops it", async () => {
+        const { api, summaryAggregator } = await setupService(true);
+        const { questionManager, interactionManager } = getInteractionManagers();
+        api.sendMessage.mockResolvedValueOnce({ message_id: 765 });
+
+        emitQuestionAsked(summaryAggregator, "question-1");
+        await vi.waitFor(() => {
+          expect(questionManager.getActiveMessageId()).toBe(765);
+        });
+        interactionManager.reset("abort_command");
+        await settle();
+
+        const edits = pollEdits(api, 765);
+        expect(edits).toHaveLength(1);
+        expect(edits[0]).toContain(t("question.not_answered"));
+        expect(edits[0]).toContain("Which option for question-1?");
+        expect(edits[0]).not.toContain("reply_markup");
+      });
+    });
+  });
+
   it("drops a released request when a full reset lands before it is shown", async () => {
     const { api, summaryAggregator } = await setupService(true);
     const { permissionManager, questionManager, interactionManager } = getInteractionManagers();
@@ -2019,5 +3050,277 @@ describe("bot/services/event-subscription-service", () => {
       { timeout: 3000 },
     );
     expect(hasText(waitingPermissionText)).toBe(false);
+  });
+
+  describe("a reply above what the agent did after it", () => {
+    function sentMessageTexts(api: FakeBotApi): string[] {
+      return api.sendMessage.mock.calls.map((call) => String(call[1]));
+    }
+
+    function indexOfSent(api: FakeBotApi, fragment: string): number {
+      return sentMessageTexts(api).findIndex((text) => text.includes(fragment));
+    }
+
+    function expectSentInOrder(api: FakeBotApi, fragments: string[]): void {
+      const indexes = fragments.map((fragment) => indexOfSent(api, fragment));
+      for (const index of indexes) {
+        expect(index).toBeGreaterThanOrEqual(0);
+      }
+      expect([...indexes].sort((a, b) => a - b)).toEqual(indexes);
+    }
+
+    async function dispatch(): Promise<void> {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+
+    function emitCommand(
+      summaryAggregator: { processEvent(event: Event): void },
+      callId: string,
+      command: string,
+    ): void {
+      emitBashTool(summaryAggregator, "running", { callId, command });
+      emitBashTool(summaryAggregator, "completed", { callId, command });
+    }
+
+    it("opens a new message below a reply already on screen for the next command", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitCommand(summaryAggregator, "call-1", "Get-ChildItem");
+      await flushPendingDispatch();
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await flushPendingDispatch();
+      emitCommand(summaryAggregator, "call-2", "Get-Content package.json");
+      await flushPendingDispatch();
+
+      expectSentInOrder(api, ["Get-ChildItem", "First reply", "Get-Content package.json"]);
+      const texts = collectSentTexts(api);
+      expect(
+        texts.some((text) => text.includes("Get-ChildItem") && text.includes("Get-Content")),
+      ).toBe(false);
+    });
+
+    it("sends a reply still waiting on its timer above the command that followed it", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitCommand(summaryAggregator, "call-1", "Get-ChildItem");
+      await flushPendingDispatch();
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await dispatch();
+      emitCommand(summaryAggregator, "call-2", "Get-Content package.json");
+      emitAssistantCompleted(summaryAggregator);
+      await flushPendingDispatch();
+
+      expectSentInOrder(api, ["Get-ChildItem", "First reply", "Get-Content package.json"]);
+      expect(sentMessageTexts(api).filter((text) => text.includes("First reply"))).toHaveLength(1);
+    });
+
+    it("keeps an earlier command above the reply when its send is rate-limited", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+      api.sendMessage.mockRejectedValueOnce(
+        new Error("Call to 'sendMessage' failed! (429: Too Many Requests: retry after 2)"),
+      );
+
+      emitCommand(summaryAggregator, "call-1", "Get-ChildItem");
+      await dispatch();
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await dispatch();
+      emitCommand(summaryAggregator, "call-2", "Get-Content package.json");
+      await flushPendingDispatch();
+      await flushPendingDispatch();
+
+      expectSentInOrder(api, ["Get-ChildItem", "First reply", "Get-Content package.json"]);
+    });
+
+    it("sends a pending reply above the thinking message of the next step", async () => {
+      const { api, summaryAggregator } = await setupService(false, { showThinkingContent: false });
+      useTrackerFakeTimers();
+
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await dispatch();
+      emitAssistantMessage(summaryAggregator, "message-2");
+      emitThinkingPart(summaryAggregator, "next step", "message-2");
+      await flushPendingDispatch();
+
+      expectSentInOrder(api, ["First reply", "💭 Thinking..."]);
+    });
+
+    it("sends a pending reply above a subagent card", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await dispatch();
+      emitSubagentStart(summaryAggregator);
+      await dispatch();
+      emitAssistantCompleted(summaryAggregator);
+      await flushPendingDispatch();
+
+      expectSentInOrder(api, ["First reply", "🧩"]);
+    });
+
+    it("sends a pending reply above a tool delivered as a document", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      useTrackerFakeTimers();
+
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await dispatch();
+      emitWriteTool(summaryAggregator, "completed");
+      emitAssistantCompleted(summaryAggregator);
+      await flushPendingDispatch();
+
+      await vi.waitFor(() => expect(api.sendDocument).toHaveBeenCalledTimes(1));
+      const replyIndex = indexOfSent(api, "First reply");
+      expect(replyIndex).toBeGreaterThanOrEqual(0);
+      expect(defined(api.sendMessage.mock.invocationCallOrder[replyIndex])).toBeLessThan(
+        defined(api.sendDocument.mock.invocationCallOrder[0]),
+      );
+    });
+
+    it("sends a pending reply above a question", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await dispatch();
+      emitQuestionAsked(summaryAggregator, "q1");
+
+      await vi.waitFor(() => {
+        expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+      });
+      expectSentInOrder(api, ["First reply", "Which option for q1?"]);
+    });
+
+    it("finishes overlapping documents around a reply's text in the order they happened", async () => {
+      const { api, summaryAggregator } = await setupService(true);
+      useTrackerFakeTimers();
+      const releases: Array<() => void> = [];
+      api.sendDocument.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            releases.push(() => resolve({ message_id: 101 }));
+          }),
+      );
+
+      emitWriteTool(summaryAggregator, "completed", "call-write-1");
+      await vi.waitFor(() => expect(api.sendDocument).toHaveBeenCalledTimes(1));
+      emitBashTool(summaryAggregator, "running", { callId: "call-held", command: "sleep 60" });
+      await dispatch();
+      emitAssistantTextPart(summaryAggregator, "First reply");
+      await dispatch();
+      emitWriteTool(summaryAggregator, "completed", "call-write-2");
+      await dispatch();
+
+      releases.shift()?.();
+      await vi.waitFor(() => expect(api.sendDocument).toHaveBeenCalledTimes(2));
+      releases.shift()?.();
+      await flushPendingDispatch();
+
+      const replyIndex = indexOfSent(api, "First reply");
+      const heldIndex = indexOfSent(api, "sleep 60");
+      expect(heldIndex).toBeGreaterThanOrEqual(0);
+      expect(heldIndex).toBeLessThan(replyIndex);
+      const replyOrder = defined(api.sendMessage.mock.invocationCallOrder[replyIndex]);
+      expect(defined(api.sendDocument.mock.invocationCallOrder[0])).toBeLessThan(replyOrder);
+      expect(replyOrder).toBeLessThan(defined(api.sendDocument.mock.invocationCallOrder[1]));
+    });
+
+    it("sends a reply nothing follows once, at completion, as before", async () => {
+      const { api, summaryAggregator } = await setupService(false);
+      useTrackerFakeTimers();
+
+      emitAssistantTextPart(summaryAggregator, "Only reply");
+      await dispatch();
+      emitAssistantCompleted(summaryAggregator);
+      await flushPendingDispatch();
+
+      expect(sentMessageTexts(api).filter((text) => text.includes("Only reply"))).toHaveLength(1);
+      expect(api.editMessageText).not.toHaveBeenCalled();
+    });
+
+    describe("compact mode", () => {
+      async function setupCompact(): Promise<Awaited<ReturnType<typeof setupService>>> {
+        const setup = await setupService(false);
+        const settingsStore = await import("../../../src/app/stores/settings-store.js");
+        settingsStore.setCompactOutputMode(true);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        useTrackerFakeTimers();
+        return setup;
+      }
+
+      it("closes the card above a reply and opens the next one below it", async () => {
+        const { api, summaryAggregator } = await setupCompact();
+
+        emitCommand(summaryAggregator, "call-1", "Get-ChildItem");
+        await flushPendingDispatch();
+        emitAssistantTextPart(summaryAggregator, "First reply");
+        await flushPendingDispatch();
+        emitBashTool(summaryAggregator, "running", { callId: "call-2", command: "Get-Content" });
+        await flushPendingDispatch();
+        emitBashTool(summaryAggregator, "completed", { callId: "call-2", command: "Get-Content" });
+        emitAssistantCompleted(summaryAggregator);
+        await flushPendingDispatch();
+        emitAssistantMessage(summaryAggregator, "message-2");
+        emitAssistantTextPart(summaryAggregator, "Second reply", "message-2");
+        await dispatch();
+        emitAssistantCompleted(summaryAggregator, "message-2");
+        await flushPendingDispatch();
+
+        const texts = sentMessageTexts(api);
+        const cards = texts
+          .map((text, index) => ({ text, index }))
+          .filter(({ text }) => text.includes("⏳ Working"));
+        expect(cards).toHaveLength(2);
+        const firstReply = indexOfSent(api, "First reply");
+        const secondReply = indexOfSent(api, "Second reply");
+        expect(defined(cards[0]).index).toBeLessThan(firstReply);
+        expect(firstReply).toBeLessThan(defined(cards[1]).index);
+        expect(defined(cards[1]).index).toBeLessThan(secondReply);
+        expect(defined(cards[1]).text).toContain("Get-Content");
+        expect(collectSentTexts(api).filter((text) => text.includes("✅ Finished Work"))).toHaveLength(
+          2,
+        );
+      });
+
+      it("sends a reply deferred behind the card above a question", async () => {
+        const { api, summaryAggregator } = await setupCompact();
+
+        emitThinkingPart(summaryAggregator, "planning");
+        await dispatch();
+        emitAssistantTextPart(summaryAggregator, "First reply");
+        await dispatch();
+        emitQuestionAsked(summaryAggregator, "q1");
+
+        await vi.waitFor(() => {
+          expect(indexOfSent(api, "Which option for q1?")).toBeGreaterThanOrEqual(0);
+        });
+        expectSentInOrder(api, ["⏳ Working", "First reply", "Which option for q1?"]);
+      });
+
+      it("keeps going when a reply starts while the card is closing", async () => {
+        const { api, summaryAggregator } = await setupCompact();
+
+        emitCommand(summaryAggregator, "call-1", "Get-ChildItem");
+        await flushPendingDispatch();
+        emitAssistantTextPart(summaryAggregator, "First reply");
+        await flushPendingDispatch();
+        emitBashTool(summaryAggregator, "running", { callId: "call-2", command: "Get-Content" });
+        emitAssistantMessage(summaryAggregator, "message-2");
+        emitAssistantTextPart(summaryAggregator, "Second reply", "message-2");
+        await flushPendingDispatch();
+        emitBashTool(summaryAggregator, "completed", { callId: "call-2", command: "Get-Content" });
+        emitAssistantCompleted(summaryAggregator);
+        emitAssistantCompleted(summaryAggregator, "message-2");
+        await flushPendingDispatch();
+
+        await vi.waitFor(() => {
+          expect(indexOfSent(api, "Second reply")).toBeGreaterThanOrEqual(0);
+        });
+        expect(indexOfSent(api, "First reply")).toBeLessThan(indexOfSent(api, "Second reply"));
+      });
+    });
   });
 });

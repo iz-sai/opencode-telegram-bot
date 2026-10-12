@@ -33,6 +33,7 @@ export const id: I18nDictionary = {
   "cmd.description.mcps": "Server MCP",
   "cmd.description.opencode_start": "Mulai server OpenCode",
   "cmd.description.opencode_stop": "Hentikan server OpenCode",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "Daftar isi direktori",
   "cmd.description.help": "Bantuan",
 
@@ -99,6 +100,10 @@ export const id: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ Sesi aktif tidak cocok dengan proyek yang dipilih, jadi sesi direset. Gunakan /sessions untuk memilih atau /new untuk membuat sesi baru.",
   "bot.prompt_send_error": "Gagal mengirim prompt ke OpenCode.",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 OpenCode mengembalikan kesalahan: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ Balasan terakhir dari asisten tidak berhasil dikirim. Kirim ulang pesanmu jika masih membutuhkannya.",
@@ -184,6 +189,8 @@ export const id: I18nDictionary = {
   "settings.prompt_queue.label": "Antrean pesan",
   "settings.value.on": "Aktif",
   "settings.value.off": "Nonaktif",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ Pengaturan disimpan.",
 
   "projects.empty":
@@ -304,6 +311,10 @@ export const id: I18nDictionary = {
   "opencode_stop.still_running": "Server masih merespons meski sudah diminta berhenti.",
   "opencode_stop.success": "✅ Server OpenCode berhasil dihentikan",
   "opencode_stop.error": "🔴 Gagal menghentikan server.\n\nPeriksa log aplikasi untuk detailnya.",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ Agent diubah menjadi: {name}",
   "agent.change_error_callback": "Gagal mengubah agent",
@@ -375,7 +386,6 @@ export const id: I18nDictionary = {
   "permission.reply.once": "Diizinkan sekali",
   "permission.reply.always": "Selalu diizinkan",
   "permission.reply.reject": "Ditolak",
-  "permission.send_reply_error": "❌ Gagal mengirim balasan izin",
   "permission.blocked.expected_reply": "⚠️ Jawab dulu permintaan izin menggunakan tombol di atas.",
   "permission.blocked.command_not_allowed":
     "⚠️ Perintah ini tidak tersedia sampai permintaan izin dijawab.",
@@ -385,6 +395,13 @@ export const id: I18nDictionary = {
   "permission.button.allow": "✅ Izinkan sekali",
   "permission.button.always": "🔓 Selalu izinkan",
   "permission.button.reject": "❌ Tolak",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Edit",
   "permission.name.write": "Tulis",
@@ -403,11 +420,11 @@ export const id: I18nDictionary = {
   "question.select_one_required_callback": "Pilih minimal satu opsi",
   "question.enter_custom_callback": "Kirim jawaban khusus sebagai pesan",
   "question.cancelled": "❌ Pertanyaan dibatalkan",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "Jawaban sudah diterima, tunggu sebentar...",
   "question.completed_no_answers": "✅ Pertanyaan selesai (tanpa jawaban)",
-  "question.no_active_project": "❌ Tidak ada proyek aktif",
-  "question.no_active_request": "❌ Tidak ada pertanyaan aktif",
-  "question.send_answers_error": "❌ Gagal mengirim jawaban ke agent",
   "question.multi_hint": "\n(Bisa pilih beberapa opsi)",
   "question.button.submit": "✅ Selesai",
   "question.button.custom": "🔤 Jawaban khusus",
@@ -431,6 +448,7 @@ export const id: I18nDictionary = {
     "⚠️ Media dalam antrean dibatasi {maxSizeMb} MiB. Tunggu hingga satu item terkirim, lalu coba lagi.",
   "queue.removed": "🗑 Pesan dihapus dari antrean.",
   "queue.not_found": "Pesan ini sudah tidak ada di antrean.",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "Aktifkan antrean pesan di /settings.",
   "keyboard.updated": "⌨️ Keyboard diperbarui",
 
@@ -448,9 +466,12 @@ export const id: I18nDictionary = {
   "subagent.line.status": "Status: {status}",
   "subagent.line.task": "Tugas: {task}",
   "subagent.line.agent": "Agent: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "Bekerja...",
   "subagent.working_with_details": "Bekerja: {details}",
   "subagent.completed": "Selesai",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "Tugas gagal",
   "subagent.status.pending": "tertunda",
   "subagent.status.running": "berjalan",
@@ -484,6 +505,15 @@ export const id: I18nDictionary = {
     "Masukkan nama pengguna server OpenCode (opsional).\nTekan Enter untuk menggunakan default: {defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "Masukkan kata sandi server OpenCode (opsional).\nTekan Enter untuk membiarkannya kosong.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid":
     "Masukkan URL yang valid (http/https) atau tekan Enter untuk default.\n",
   "runtime.wizard.start": "Menyiapkan OpenCode Telegram Bot.\n",
@@ -537,6 +567,7 @@ export const id: I18nDictionary = {
   "task.kind.once": "sekali",
   "task.run.success": "⏰ Tugas terjadwal selesai: {description}",
   "task.run.error": "🔴 Tugas terjadwal gagal: {description}\n\nKesalahan: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question":
     "Tugas terjadwal meminta pertanyaan interaktif, jadi tidak bisa lanjut tanpa pengawasan.",
   "task.run.error.interactive_permission":

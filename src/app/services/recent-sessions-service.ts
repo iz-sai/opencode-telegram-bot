@@ -1,6 +1,8 @@
 import type { GlobalSession } from "@opencode-ai/sdk/v2";
 import { opencodeClient } from "../../opencode/client.js";
 import { getCurrentSession } from "../stores/settings-store.js";
+import { logger } from "../../utils/logger.js";
+import { checkFolderPresence, collectFromPresentFolders } from "./folder-presence-service.js";
 
 export type RecentStatus = "question" | "permission" | "running" | "idle";
 type RecentSessionInfo = Pick<GlobalSession, "id" | "directory" | "title" | "time">;
@@ -31,14 +33,17 @@ export async function resolveSessionParentChain(
 }
 
 export async function loadRecentSessions(limit: number): Promise<RecentSession[]> {
-  const sessions: RecentSessionInfo[] = await loadGlobalSessions(limit);
+  // Sessions whose folder is gone are left out and do not take places within the limit.
+  const sessions: RecentSessionInfo[] = (
+    await collectFromPresentFolders(loadGlobalSessions, (session) => session.directory, limit)
+  ).slice(0, limit);
   const attached = getCurrentSession();
   if (attached && !sessions.some((session) => session.id === attached.id) && sessions.length > 0) {
     const { data, error } = await opencodeClient.session.get({
       sessionID: attached.id,
       directory: attached.directory,
     });
-    if (!error && data && !data.parentID) {
+    if (!error && data && !data.parentID && (await checkFolderPresence(data.directory)) !== "missing") {
       sessions.splice(limit - 1, 1, data);
     }
   }
@@ -57,19 +62,27 @@ export async function loadRecentSessions(limit: number): Promise<RecentSession[]
       opencodeClient.question.list({ directory }),
       opencodeClient.permission.list({ directory }),
     ]);
-    if (statusResult.error || !statusResult.data) throw statusResult.error || new Error("No status received");
-    if (questionResult.error || !questionResult.data) throw questionResult.error || new Error("No questions received");
-    if (permissionResult.error || !permissionResult.data) throw permissionResult.error || new Error("No permissions received");
+    // A failed lookup counts as "nothing found" for its own part only, so one bad folder never fails the list.
+    const warnFailed = (lookup: string, error: unknown) =>
+      logger.warn(`[Recent] Failed to load ${lookup} for ${directory}; showing it without them:`, error);
+    if (statusResult.error || !statusResult.data) warnFailed("run statuses", statusResult.error);
+    if (questionResult.error || !questionResult.data) warnFailed("pending questions", questionResult.error);
+    if (permissionResult.error || !permissionResult.data) warnFailed("pending permissions", permissionResult.error);
 
     const roots = new Set(group.map((session) => session.id));
-    const questions = new Set(questionResult.data.map((request) => request.sessionID));
+    // A subagent's pending request marks the root it runs under.
+    const questions = new Set<string>();
+    for (const request of questionResult.data ?? []) {
+      const chain = await resolveSessionParentChain(request.sessionID, directory, roots);
+      if (chain) questions.add(chain.root);
+    }
     const permissions = new Set<string>();
-    for (const request of permissionResult.data) {
+    for (const request of permissionResult.data ?? []) {
       const chain = await resolveSessionParentChain(request.sessionID, directory, roots);
       if (chain) permissions.add(chain.root);
     }
     for (const session of group) {
-      const run = statusResult.data[session.id]?.type;
+      const run = statusResult.data?.[session.id]?.type;
       statuses.set(session.id, questions.has(session.id)
         ? "question"
         : permissions.has(session.id)

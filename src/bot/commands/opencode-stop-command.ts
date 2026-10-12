@@ -11,12 +11,15 @@ import { t } from "../../i18n/index.js";
 import { isContainerRuntime } from "../../runtime/container.js";
 import { editBotText } from "../messages/telegram-text.js";
 import { promptQueue } from "../../app/managers/prompt-queue-manager.js";
+import { withdrawPromptQueue } from "../../app/services/prompt-inbox-service.js";
 import { markAttachedSessionIdle } from "../../app/services/attach-service.js";
 import { clearPromptResponseMode } from "../handlers/prompt.js";
+import { withdrawAllHandedOverPrompts } from "../handlers/prompt-handover.js";
 
 export type OpencodeStopCommandDeps = Pick<
   AppContainer,
   | "attachManager"
+  | "endRunLostWithServer"
   | "foregroundSessionState"
   | "opencodeReadyLifecycle"
   | "resetInteractions"
@@ -37,6 +40,8 @@ async function releaseLocalStateAfterServerStop(deps: OpencodeStopCommandDeps): 
     sessionIds.add(attached.sessionId);
   }
 
+  // The stopped server never ends its run: the chat ends it as after /abort (V2 only).
+  await deps.endRunLostWithServer(STOP_REASON);
   deps.resetRuntimeStreams(STOP_REASON);
   deps.foregroundSessionState.clearAll(STOP_REASON);
 
@@ -80,6 +85,11 @@ export async function opencodeStopCommand(
     }
 
     const statusMessage = await ctx.reply(t("opencode_stop.stopping", { pid }));
+
+    // The OpenCode V2 inbox outlives the process, so waiting prompts are withdrawn first,
+    // those handed over at /detach included.
+    await withdrawPromptQueue(STOP_REASON);
+    await withdrawAllHandedOverPrompts(STOP_REASON);
 
     const stopped = await killServerProcess(pid, 5000);
     if (!stopped) {

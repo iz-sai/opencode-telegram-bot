@@ -1,21 +1,18 @@
 import { t } from "../../../i18n/index.js";
 import { logger } from "../../../utils/logger.js";
-import {
-  getDeleteCompactProgressOnFinish,
-  getShowAssistantRunFooter,
-} from "../../../app/stores/settings-store.js";
 import { markAttachedSessionIdle } from "../../../app/services/attach-service.js";
 import { shouldSuppressUserAbortSessionError } from "../../../app/managers/abort-suppression-manager.js";
-import { formatAssistantRunFooter } from "../../../app/formatters/assistant-run-footer-formatter.js";
 import { clearPromptResponseMode } from "../../handlers/prompt.js";
 import { dispatchNextQueuedPrompt } from "../../handlers/prompt-queue-dispatch.js";
+import { wakePromptHandover } from "../../handlers/prompt-handover.js";
 import { resetStreamThrottle } from "../../streaming/stream-throttle.js";
+import { buildFailedToolEvent } from "../failed-tool-event.js";
 import {
   formatSessionMessage,
-  getReplyKeyboard,
   isCompactProgressMode,
   type EventHandlerDeps,
 } from "./handler-context.js";
+import { closeForegroundRun } from "./run-close.js";
 
 const SESSION_RETRY_PREFIX = "🔁";
 
@@ -28,24 +25,54 @@ type SessionLifecycleDeps = EventHandlerDeps<
   | "summaryAggregator"
 >;
 
+/**
+ * OpenCode V1 stops a run without ending its running calls: each foreground one ends here
+ * as OpenCode V2 ends it, failed, so its line drops the running mark. Background calls stay.
+ */
+function endRunningForegroundCalls(
+  { runtime, summaryAggregator }: SessionLifecycleDeps,
+  sessionId: string,
+): void {
+  const now = Date.now();
+  for (const tool of runtime.getRunningToolInfos(sessionId)) {
+    if (!runtime.runningToolTracker.isBackground(tool.callId)) {
+      summaryAggregator.processEvent(buildFailedToolEvent(tool, now));
+    }
+  }
+}
+
 /** Session idle, error and retry. */
 export function registerSessionLifecycleHandlers(deps: SessionLifecycleDeps): void {
   const { runtime, policy, summaryAggregator } = deps;
 
-  summaryAggregator.setOnSessionIdle(async (sessionId) => {
+  summaryAggregator.setOnSessionIdle(async (sessionId, { interrupted }) => {
+    wakePromptHandover(sessionId);
     resetStreamThrottle(sessionId);
     await markAttachedSessionIdle(sessionId, deps);
     // Dropped immediately when this session is no longer current: the early
     // returns below would otherwise leave a compact-progress timer armed.
     // A still-current session keeps the card until after in-flight completion
     // work, then finalizes it (delete or finished summary).
-    runtime.clearToolTracking(sessionId, "session_idle");
     const canFinalizeCompactProgress =
       Boolean(policy.getDestination(sessionId)) && policy.isForegroundSession(sessionId);
+    // Background operations outlive the turn only in the session the user follows.
+    if (!canFinalizeCompactProgress) {
+      runtime.stopBackgroundOperations("session_idle", sessionId);
+    }
+    runtime.clearToolTracking(sessionId, "session_idle", canFinalizeCompactProgress);
     if (!canFinalizeCompactProgress) {
       runtime.compactProgressStreamer.clearSession(sessionId, "session_idle");
     }
     await runtime.getCompletionTask(sessionId)?.catch(() => undefined);
+
+    // A turn the bot did not start that was stopped from a client ends like an aborted one.
+    if (
+      interrupted &&
+      deps.assistantRunState.hasRun(sessionId) &&
+      !deps.assistantRunState.hasBotRun(sessionId)
+    ) {
+      deps.assistantRunState.clearRun(sessionId, "session_interrupted");
+    }
 
     const completedRun = deps.assistantRunState.isResponseCompleted(sessionId)
       ? deps.assistantRunState.finishRun(sessionId, "session_idle")
@@ -67,34 +94,7 @@ export function registerSessionLifecycleHandlers(deps: SessionLifecycleDeps): vo
     }
 
     try {
-      await Promise.all([
-        runtime.toolMessageBatcher.flushSession(sessionId, "session_idle"),
-        runtime.toolCallStreamer.breakSession(sessionId, "session_idle"),
-      ]);
-
-      await runtime.compactProgressStreamer.finalize(sessionId, getDeleteCompactProgressOnFinish());
-
-      if (getShowAssistantRunFooter() && completedRun?.hasCompletedResponse) {
-        const agent = completedRun.actualAgent || completedRun.configuredAgent;
-        const providerID = completedRun.actualProviderID || completedRun.configuredProviderID;
-        const modelID = completedRun.actualModelID || completedRun.configuredModelID;
-
-        if (agent && providerID && modelID) {
-          const keyboard = getReplyKeyboard(deps);
-          await runtime.delivery.sendText(
-            destination,
-            formatAssistantRunFooter({
-              agent,
-              providerID,
-              modelID,
-              elapsedMs: Date.now() - completedRun.startedAt,
-            }),
-            {
-              ...(keyboard ? { reply_markup: keyboard } : {}),
-            },
-          );
-        }
-      }
+      await closeForegroundRun(deps, sessionId, destination, completedRun, "session_idle");
     } catch (err) {
       logger.error("[Bot] Failed to send session idle footer:", err);
     } finally {
@@ -104,11 +104,19 @@ export function registerSessionLifecycleHandlers(deps: SessionLifecycleDeps): vo
     }
   });
 
-  summaryAggregator.setOnSessionError(async (sessionId, message) => {
+  summaryAggregator.setOnSessionError(async (sessionId, message, { interrupted }) => {
+    if (interrupted) {
+      endRunningForegroundCalls(deps, sessionId);
+    }
+    wakePromptHandover(sessionId);
     await markAttachedSessionIdle(sessionId, deps);
-    runtime.clearToolTracking(sessionId, "session_error");
-
     const destination = policy.getDestination(sessionId);
+    const keepBackground = Boolean(destination) && policy.isForegroundSession(sessionId);
+    if (!keepBackground) {
+      runtime.stopBackgroundOperations("session_error", sessionId);
+    }
+    runtime.clearToolTracking(sessionId, "session_error", keepBackground);
+
     if (!destination) {
       clearPromptResponseMode(sessionId);
       runtime.compactProgressStreamer.clearSession(sessionId, "session_error_no_bot_context");
@@ -129,7 +137,8 @@ export function registerSessionLifecycleHandlers(deps: SessionLifecycleDeps): vo
     }
 
     runtime.clearAssistantResponseSession(sessionId, "session_error");
-    runtime.compactProgressStreamer.clearSession(sessionId, "session_error");
+    // Parked cards keep counting their background operations, as their full-mode lines do.
+    runtime.compactProgressStreamer.discardOpenCard(sessionId, "session_error");
     clearPromptResponseMode(sessionId);
     deps.assistantRunState.clearRun(sessionId, "session_error");
     await Promise.all([

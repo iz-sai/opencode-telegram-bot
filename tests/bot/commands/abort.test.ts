@@ -12,6 +12,7 @@ import {
   shouldSuppressUserAbortSessionError,
 } from "../../../src/app/managers/abort-suppression-manager.js";
 import { createTestAppContainer } from "../../helpers/app-container.js";
+import { defined } from "../../helpers/defined.js";
 import type { AppContainer } from "../../../src/app/bootstrap/app-container.js";
 
 const mocked = vi.hoisted(() => ({
@@ -21,6 +22,8 @@ const mocked = vi.hoisted(() => ({
   clearRunMock: vi.fn(),
   markAttachedSessionIdleMock: vi.fn(),
   clearPromptResponseModeMock: vi.fn(),
+  inboxCancelMock: vi.fn(),
+  withdrawHandedOverPromptsMock: vi.fn(),
 }));
 
 vi.mock("../../../src/app/services/session-service.js", () => ({
@@ -34,6 +37,9 @@ vi.mock("../../../src/opencode/client.js", () => ({
       status: mocked.statusMock,
     },
   },
+  opencodeV2Client: {
+    session: { inbox: { cancel: mocked.inboxCancelMock } },
+  },
 }));
 
 vi.mock("../../../src/app/services/attach-service.js", () => ({
@@ -42,6 +48,10 @@ vi.mock("../../../src/app/services/attach-service.js", () => ({
 
 vi.mock("../../../src/bot/handlers/prompt.js", () => ({
   clearPromptResponseMode: mocked.clearPromptResponseModeMock,
+}));
+
+vi.mock("../../../src/bot/handlers/prompt-handover.js", () => ({
+  withdrawHandedOverPrompts: mocked.withdrawHandedOverPromptsMock,
 }));
 
 const TEST_QUESTION: Question = {
@@ -70,7 +80,7 @@ function createDeps() {
 }
 
 function activateInteractionState(): void {
-  container.questionManager.startQuestions([TEST_QUESTION], "req-abort");
+  container.questionManager.startQuestions([TEST_QUESTION], "req-abort", "session-1");
   container.interactionManager.waitPermission(TEST_PERMISSION);
 }
 
@@ -90,7 +100,33 @@ describe("bot/commands/abort", () => {
     mocked.markAttachedSessionIdleMock.mockReset();
     mocked.markAttachedSessionIdleMock.mockResolvedValue(undefined);
     mocked.clearPromptResponseModeMock.mockReset();
+    mocked.withdrawHandedOverPromptsMock.mockReset().mockResolvedValue(undefined);
     __resetUserAbortErrorSuppressionForTests();
+  });
+
+  it("withdraws what /detach handed over to the session before aborting it", async () => {
+    mocked.currentSession = { id: "session-1", title: "Session", directory: "D:/repo" };
+    mocked.abortMock.mockResolvedValue({ data: true, error: null });
+    mocked.statusMock.mockResolvedValue({ data: { "session-1": { type: "idle" } }, error: null });
+    const ctx = { chat: { id: 1 }, reply: vi.fn().mockResolvedValue({ message_id: 1 }) };
+
+    await abortCommand(ctx as never, createDeps());
+
+    expect(mocked.withdrawHandedOverPromptsMock).toHaveBeenCalledWith("session-1", "abort_command");
+    expect(
+      defined(mocked.withdrawHandedOverPromptsMock.mock.invocationCallOrder[0]),
+    ).toBeLessThan(defined(mocked.abortMock.mock.invocationCallOrder[0]));
+  });
+
+  it("leaves handed-over messages alone in the abort /start shares", async () => {
+    mocked.currentSession = { id: "session-1", title: "Session", directory: "D:/repo" };
+    mocked.abortMock.mockResolvedValue({ data: true, error: null });
+    mocked.statusMock.mockResolvedValue({ data: { "session-1": { type: "idle" } }, error: null });
+    const ctx = { chat: { id: 1 }, reply: vi.fn().mockResolvedValue({ message_id: 1 }) };
+
+    await abortCurrentOperation(ctx as never, createDeps(), { notifyUser: false });
+
+    expect(mocked.withdrawHandedOverPromptsMock).not.toHaveBeenCalled();
   });
 
   function markSessionBusy(): void {
@@ -190,6 +226,43 @@ describe("bot/commands/abort", () => {
     expect(promptQueue.size()).toBe(0);
   });
 
+  it("withdraws prompts waiting in the OpenCode inbox before interrupting the turn", async () => {
+    mocked.currentSession = {
+      id: "session-1",
+      title: "Session",
+      directory: "D:/repo",
+    };
+    const order: string[] = [];
+    mocked.inboxCancelMock.mockReset().mockImplementation(async () => {
+      order.push("cancel");
+      return { data: true, error: undefined };
+    });
+    mocked.abortMock.mockImplementation(async () => {
+      order.push("abort");
+      return { data: true, error: null };
+    });
+    mocked.statusMock.mockResolvedValue({
+      data: { "session-1": { type: "idle" } },
+      error: null,
+    });
+    promptQueue.confirmReservation(promptQueue.reserve()!, {
+      displayText: "steered",
+      inbox: { sessionId: "session-1", inboxId: "msg-1", delivery: "steer" },
+    });
+
+    const ctx = {
+      chat: { id: 777 },
+      reply: vi.fn().mockResolvedValue({ message_id: 88 }),
+      api: { editMessageText: vi.fn().mockResolvedValue(undefined) },
+    } as unknown as Context;
+
+    await abortCommand(ctx as never, createDeps());
+
+    expect(mocked.inboxCancelMock).toHaveBeenCalledWith({ sessionID: "session-1", inboxID: "msg-1" });
+    expect(order).toEqual(["cancel", "abort"]);
+    expect(promptQueue.size()).toBe(0);
+  });
+
   it("drops the pending attachment so it does not ride along on a later prompt", async () => {
     mocked.currentSession = {
       id: "session-1",
@@ -243,6 +316,112 @@ describe("bot/commands/abort", () => {
     expect(shouldSuppressUserAbortSessionError("session-1", "Model not found")).toBe(false);
     expect(shouldSuppressUserAbortSessionError("session-1", " Aborted ")).toBe(true);
     expect(shouldSuppressUserAbortSessionError("session-1", "Aborted")).toBe(false);
+  });
+
+  describe("background operations and subagent cards", () => {
+    function createBackgroundDeps() {
+      return {
+        ...createDeps(),
+        stopBackgroundCommands: vi.fn(),
+        stopBackgroundOperations: vi.fn(),
+        interruptSubagents: vi.fn(),
+      };
+    }
+
+    function createCtx(editMessageText = vi.fn().mockResolvedValue(undefined)) {
+      return {
+        chat: { id: 777 },
+        reply: vi.fn().mockResolvedValue({ message_id: 88 }),
+        api: { editMessageText },
+      } as unknown as Context;
+    }
+
+    beforeEach(() => {
+      mocked.currentSession = { id: "session-1", title: "Session", directory: "D:/repo" };
+    });
+
+    it("stops following background commands before it asks OpenCode to abort", async () => {
+      mocked.abortMock.mockResolvedValue({ data: true, error: null });
+      mocked.statusMock.mockResolvedValue({ data: { "session-1": { type: "idle" } }, error: null });
+      const deps = createBackgroundDeps();
+
+      await abortCommand(createCtx() as never, deps);
+
+      expect(deps.stopBackgroundCommands).toHaveBeenCalledWith("abort_command", "session-1");
+      expect(defined(deps.stopBackgroundCommands.mock.invocationCallOrder[0])).toBeLessThan(
+        defined(mocked.abortMock.mock.invocationCallOrder[0]),
+      );
+    });
+
+    it("interrupts the subagent cards right after the success reply", async () => {
+      mocked.abortMock.mockResolvedValue({ data: true, error: null });
+      mocked.statusMock.mockResolvedValue({ data: { "session-1": { type: "idle" } }, error: null });
+      const editMessageText = vi.fn().mockResolvedValue(undefined);
+      const deps = createBackgroundDeps();
+
+      await abortCommand(createCtx(editMessageText) as never, deps);
+
+      expect(editMessageText).toHaveBeenCalledWith(777, 88, t("stop.success"));
+      expect(deps.interruptSubagents).toHaveBeenCalledWith("abort_command");
+      expect(defined(editMessageText.mock.invocationCallOrder[0])).toBeLessThan(
+        defined(deps.interruptSubagents.mock.invocationCallOrder[0]),
+      );
+      expect(deps.stopBackgroundOperations).not.toHaveBeenCalled();
+    });
+
+    it("interrupts the subagent cards even when the success reply cannot be shown", async () => {
+      mocked.abortMock.mockResolvedValue({ data: true, error: null });
+      mocked.statusMock.mockResolvedValue({ data: { "session-1": { type: "idle" } }, error: null });
+      const editMessageText = vi.fn().mockRejectedValue(new Error("Too Many Requests: 429"));
+      const deps = createBackgroundDeps();
+
+      await abortCommand(createCtx(editMessageText) as never, deps);
+
+      expect(deps.interruptSubagents).toHaveBeenCalledWith("abort_command");
+      expect(deps.stopBackgroundOperations).not.toHaveBeenCalled();
+    });
+
+    it("interrupts the subagent cards in the silent abort /start shares", async () => {
+      mocked.abortMock.mockResolvedValue({ data: true, error: null });
+      mocked.statusMock.mockResolvedValue({ data: { "session-1": { type: "idle" } }, error: null });
+      const deps = createBackgroundDeps();
+
+      await abortCurrentOperation(createCtx() as never, deps, { notifyUser: false });
+
+      expect(deps.interruptSubagents).toHaveBeenCalledWith("abort_command");
+      expect(deps.stopBackgroundOperations).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["an API error", () => mocked.abortMock.mockResolvedValue({ data: null, error: new Error("x") })],
+      ["an unconfirmed result", () => mocked.abortMock.mockResolvedValue({ data: false, error: null })],
+      [
+        "a session still busy",
+        () => {
+          mocked.abortMock.mockResolvedValue({ data: true, error: null });
+          mocked.statusMock.mockResolvedValue({
+            data: { "session-1": { type: "busy" } },
+            error: null,
+          });
+        },
+      ],
+      ["a local failure", () => mocked.abortMock.mockRejectedValue(new Error("network failed"))],
+    ])("leaves the subagent cards as they were on %s", async (_case, arrange) => {
+      vi.useFakeTimers();
+      try {
+        arrange();
+        const deps = createBackgroundDeps();
+
+        const aborting = abortCommand(createCtx() as never, deps);
+        await vi.advanceTimersByTimeAsync(6_000);
+        await aborting;
+
+        expect(deps.stopBackgroundOperations).toHaveBeenCalledWith("abort_command", "session-1");
+        expect(deps.interruptSubagents).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("can abort silently without progress messages", async () => {

@@ -33,6 +33,7 @@ export const ko: I18nDictionary = {
   "cmd.description.mcps": "MCP 서버",
   "cmd.description.opencode_start": "OpenCode 서버 시작",
   "cmd.description.opencode_stop": "OpenCode 서버 중지",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "디렉터리 내용 보기",
   "cmd.description.help": "도움말",
 
@@ -101,6 +102,10 @@ export const ko: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ 활성 세션이 선택한 프로젝트와 일치하지 않아 초기화되었습니다. /sessions에서 세션을 선택하거나 /new로 새 세션을 만들어 주세요.",
   "bot.prompt_send_error": "OpenCode에 요청을 보내지 못했습니다.",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 OpenCode 오류가 발생했습니다: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
@@ -184,6 +189,8 @@ export const ko: I18nDictionary = {
   "settings.prompt_queue.label": "메시지 대기열",
   "settings.value.on": "켜기",
   "settings.value.off": "끄기",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ 설정이 저장되었습니다.",
 
   "projects.empty":
@@ -313,6 +320,10 @@ export const ko: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode 서버가 성공적으로 중지되었습니다",
   "opencode_stop.error":
     "🔴 서버 중지 중 오류가 발생했습니다.\n\n자세한 내용은 애플리케이션 로그를 확인해 주세요.",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ 에이전트가 변경되었습니다: {name}",
   "agent.change_error_callback": "에이전트 변경 실패",
@@ -385,7 +396,6 @@ export const ko: I18nDictionary = {
   "permission.reply.once": "한 번 허용됨",
   "permission.reply.always": "항상 허용됨",
   "permission.reply.reject": "거부됨",
-  "permission.send_reply_error": "❌ 권한 응답 전송에 실패했습니다",
   "permission.blocked.expected_reply":
     "⚠️ 먼저 위의 버튼으로 권한 요청에 답해 주세요.",
   "permission.blocked.command_not_allowed":
@@ -395,6 +405,13 @@ export const ko: I18nDictionary = {
   "permission.button.allow": "✅ 한 번 허용",
   "permission.button.always": "🔓 항상 허용",
   "permission.button.reject": "❌ 거부",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "Bash",
   "permission.name.edit": "편집",
   "permission.name.write": "쓰기",
@@ -413,11 +430,11 @@ export const ko: I18nDictionary = {
   "question.select_one_required_callback": "옵션을 하나 이상 선택해 주세요",
   "question.enter_custom_callback": "직접 입력한 답변을 메시지로 보내 주세요",
   "question.cancelled": "❌ 설문이 취소되었습니다",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "답변이 이미 접수되었습니다. 잠시만 기다려 주세요...",
   "question.completed_no_answers": "✅ 설문 완료 (답변 없음)",
-  "question.no_active_project": "❌ 활성 프로젝트가 없습니다",
-  "question.no_active_request": "❌ 활성 요청이 없습니다",
-  "question.send_answers_error": "❌ 에이전트에 답변을 보내지 못했습니다",
   "question.multi_hint": "\n(여러 옵션을 선택할 수 있습니다)",
   "question.button.submit": "✅ 완료",
   "question.button.custom": "🔤 직접 입력",
@@ -439,6 +456,7 @@ export const ko: I18nDictionary = {
   "queue.media_limit": "⚠️ 대기열 미디어는 총 {maxSizeMb} MiB로 제한됩니다. 항목이 전송된 후 다시 시도하세요.",
   "queue.removed": "🗑 대기열에서 메시지를 삭제했습니다.",
   "queue.not_found": "이 메시지는 더 이상 대기열에 없습니다.",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "메시지 대기열은 /settings에서 활성화할 수 있습니다.",
   "keyboard.updated": "⌨️ 키보드가 업데이트되었습니다",
 
@@ -456,9 +474,12 @@ export const ko: I18nDictionary = {
   "subagent.line.status": "상태: {status}",
   "subagent.line.task": "작업: {task}",
   "subagent.line.agent": "에이전트: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "작업 중...",
   "subagent.working_with_details": "작업 중: {details}",
   "subagent.completed": "완료됨",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "작업 실패",
   "subagent.status.pending": "대기 중",
   "subagent.status.running": "실행 중",
@@ -492,6 +513,15 @@ export const ko: I18nDictionary = {
     "OpenCode 서버 사용자 이름을 입력하세요 (선택 사항).\nEnter를 누르면 기본값({defaultUsername})이 사용됩니다.\n> ",
   "runtime.wizard.ask_server_password":
     "OpenCode 서버 비밀번호를 입력하세요 (선택 사항).\nEnter를 누르면 비워 둡니다.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid":
     "유효한 URL(http/https)을 입력하거나 Enter를 눌러 기본값을 사용하세요.\n",
   "runtime.wizard.start": "OpenCode Telegram Bot 설정을 시작합니다.\n",
@@ -547,6 +577,7 @@ export const ko: I18nDictionary = {
   "task.kind.once": "1회성",
   "task.run.success": "⏰ 예약 작업 완료: {description}",
   "task.run.error": "🔴 예약 작업 실패: {description}\n\n오류: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question":
     "예약 작업이 대화형 질문을 요청하여 무인 실행을 계속할 수 없습니다.",
   "task.run.error.interactive_permission":

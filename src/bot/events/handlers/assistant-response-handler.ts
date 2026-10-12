@@ -4,7 +4,13 @@ import {
   getShowAssistantRunFooter,
   getShowThinkingContent,
 } from "../../../app/stores/settings-store.js";
-import { clearPromptResponseMode } from "../../handlers/prompt.js";
+import { clearPromptResponseMode, startInboxPromptRun } from "../../handlers/prompt.js";
+import { promptQueue, type QueuedPrompt } from "../../../app/managers/prompt-queue-manager.js";
+import { promptHandover } from "../../../app/managers/prompt-handover-manager.js";
+import { buildExternalUserInputNotification } from "../../../app/services/external-user-input-service.js";
+import { getCurrentSession } from "../../../app/services/session-service.js";
+import { sendBotText } from "../../messages/telegram-text.js";
+import { closeForegroundRun } from "./run-close.js";
 import { finalizeAssistantResponse } from "../../streaming/finalize-assistant-response.js";
 import { sendTtsResponseForSession } from "../../handlers/tts-response-handler.js";
 import { deliverThinkingMessage } from "../../messages/thinking-message.js";
@@ -30,6 +36,7 @@ type KeepAssistantDraftsDeps = EventHandlerDeps<"keyboardManager">;
 
 type AssistantResponseDeps = EventHandlerDeps<
   | "assistantRunState"
+  | "attachManager"
   | "externalUserInputSuppressionManager"
   | "foregroundSessionState"
   | "keyboardManager"
@@ -37,6 +44,64 @@ type AssistantResponseDeps = EventHandlerDeps<
   | "scheduledTaskRuntime"
   | "summaryAggregator"
 >;
+
+/**
+ * OpenCode picked up a prompt the bot sent into the session inbox: its button is already
+ * gone, the quote is sent with the refreshed keyboard. A queued prompt is picked up only
+ * once the turn has answered, inside the same execution, so it closes that run and opens
+ * its own - as a prompt queued in the bot does.
+ */
+async function pickUpInboxPrompt(
+  deps: AssistantResponseDeps,
+  sessionId: string,
+  item: QueuedPrompt,
+): Promise<void> {
+  const { policy } = deps;
+  const destination = policy.getDestination(sessionId);
+  if (!destination || !policy.isForegroundSession(sessionId)) {
+    return;
+  }
+
+  logger.info(
+    `[PromptQueue] Inbox prompt picked up: inboxId=${item.inbox?.inboxId}, delivery=${item.inbox?.delivery}`,
+  );
+
+  try {
+    if (item.inbox?.delivery === "queue" && deps.assistantRunState.hasRun(sessionId)) {
+      const completedRun = deps.assistantRunState.finishRun(sessionId, "inbox_queue_pickup");
+      clearPromptResponseMode(sessionId);
+      await closeForegroundRun(deps, sessionId, destination, completedRun, "inbox_queue_pickup");
+    }
+
+    if (!deps.assistantRunState.hasBotRun(sessionId)) {
+      const session = getCurrentSession();
+      if (session?.id === sessionId) {
+        await startInboxPromptRun(session, deps, item.responseMode);
+      }
+    }
+  } catch (err) {
+    logger.error("[PromptQueue] Failed to switch runs on inbox pickup:", err);
+  }
+
+  const notification = buildExternalUserInputNotification(item.displayText);
+  if (!notification) {
+    return;
+  }
+
+  try {
+    const keyboard = getReplyKeyboard(deps);
+    await sendBotText({
+      api: destination.api,
+      chatId: destination.chatId,
+      text: notification.text,
+      rawFallbackText: notification.rawFallbackText,
+      format: "markdown_v2",
+      options: keyboard ? { reply_markup: keyboard } : {},
+    });
+  } catch (err) {
+    logger.error("[PromptQueue] Failed to echo picked up inbox prompt:", err);
+  }
+}
 
 async function completeThinkingStream(
   { runtime, policy }: EventHandlerBase,
@@ -178,16 +243,67 @@ function enqueueAssistantReply(
   }
 
   if (streamer.hasPendingSend(sessionId)) {
-    void streamer.flushPending(sessionId).then(() => {
+    const deferral = streamer.flushPending(sessionId).then(() => {
       if (runtime.isAssistantCompletionStarted(sessionId, messageId)) {
         return;
       }
       enqueue();
     });
+    runtime.setReplyEnqueueDeferral(sessionId, deferral);
     return;
   }
 
   enqueue();
+}
+
+/**
+ * The first text of an `edit` reply divides what the agent did before it from what
+ * it does next: the latter goes below the reply.
+ */
+function beginEditReply(runtime: SessionRuntimeState, sessionId: string, messageId: string): void {
+  if (
+    runtime.getAssistantStreamMode(sessionId, messageId) !== "edit" ||
+    runtime.isReplyBegun(sessionId, messageId)
+  ) {
+    return;
+  }
+
+  runtime.markReplyBegun(sessionId, messageId);
+  if (isCompactProgressMode()) {
+    runtime.markCompactCloseDue(sessionId, messageId);
+  } else {
+    runtime.startReplyCut(sessionId);
+  }
+}
+
+/**
+ * Compact mode: the first activity after a reply's text closes the card above the
+ * reply, once the reply is out, and opens a new card below it.
+ */
+export function closeCompactCardBeforeNextActivity(
+  runtime: SessionRuntimeState,
+  sessionId: string,
+): void {
+  const streamer = runtime.compactProgressStreamer;
+  // A close already under way replays this activity into the next card itself.
+  if (streamer.isHolding(sessionId) || runtime.takeCompactCloseDue(sessionId) === undefined) {
+    return;
+  }
+
+  const letOutReply = runtime.takeReplyGate(sessionId);
+  streamer.holdForClose(sessionId);
+  void runtime.enqueueCompletionTask(sessionId, async () => {
+    try {
+      await letOutReply?.();
+      await streamer.finalize(sessionId, getDeleteCompactProgressOnFinish());
+    } catch (error) {
+      streamer.releaseHold(sessionId);
+      logger.error(
+        `[Bot] Failed to close the progress card after a reply: session=${sessionId}`,
+        error,
+      );
+    }
+  });
 }
 
 /** Streamed replies, their completion, thinking and external user input. */
@@ -214,17 +330,23 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
     preparedStreamPayload.sendOptions = { disable_notification: true };
     preparedStreamPayload.editOptions = undefined;
 
+    beginEditReply(runtime, sessionId, messageId);
     enqueueAssistantReply(runtime, sessionId, messageId, preparedStreamPayload);
   });
 
   summaryAggregator.setOnComplete((sessionId, messageId, messageText, completionInfo) => {
+    // Its card closed when the next activity came: the open card is below this reply.
+    const compactCardClosed = runtime.takeCompactClosedForReply(sessionId, messageId);
     if (
       isCompactProgressMode() &&
       policy.getDestination(sessionId) &&
       policy.isForegroundSession(sessionId)
     ) {
       runtime.markAssistantCompletionStarted(sessionId, messageId);
-      if (runtime.stripDeliveredAssistantText(sessionId, messageId, messageText).trim()) {
+      if (
+        !compactCardClosed &&
+        runtime.stripDeliveredAssistantText(sessionId, messageId, messageText).trim()
+      ) {
         runtime.compactProgressStreamer.holdForClose(sessionId);
       }
     }
@@ -255,6 +377,12 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
       }
 
       try {
+        // A turn the bot did not start gets its run from its first reply, timed from the turn's
+        // start; a turn already over (aborted, errored, idle) opens none.
+        const turnStartedAt = summaryAggregator.getLiveTurnStartedAt(sessionId);
+        if (turnStartedAt !== null) {
+          deps.assistantRunState.startObservedRun(sessionId, turnStartedAt);
+        }
         deps.assistantRunState.markResponseCompleted(sessionId, {
           agent: completionInfo.agent,
           providerID: completionInfo.providerID,
@@ -265,8 +393,22 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
 
         const assistantResponseMode = runtime.getAssistantStreamMode(sessionId, messageId);
 
-        const remainingText = runtime.stripDeliveredAssistantText(sessionId, messageId, messageText);
-        if (isCompactProgressMode() && remainingText.trim()) {
+        // Tool output that started after this reply's text waits below it.
+        if (
+          assistantResponseMode === "edit" &&
+          runtime.toolCallStreamer.hasUnsentMessages(sessionId)
+        ) {
+          await runtime.letOutReplies(sessionId);
+        }
+
+        const remainingText = runtime.stripDeliveredAssistantText(
+          sessionId,
+          messageId,
+          messageText,
+        );
+        const closesCompactCard =
+          isCompactProgressMode() && !compactCardClosed && Boolean(remainingText.trim());
+        if (closesCompactCard) {
           await runtime.compactProgressStreamer.flushPending(sessionId);
         }
 
@@ -285,7 +427,7 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
               ),
           },
           flushPendingServiceMessages: () => {
-            runtime.clearToolTracking(sessionId, "assistant_message_completed");
+            runtime.clearToolTracking(sessionId, "assistant_message_completed", true);
 
             return Promise.all([
               runtime.toolMessageBatcher.flushSession(sessionId, "assistant_message_completed"),
@@ -305,12 +447,12 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
           },
         });
 
-        if (isCompactProgressMode() && remainingText.trim()) {
+        if (closesCompactCard) {
           await runtime.compactProgressStreamer.finalize(
             sessionId,
             getDeleteCompactProgressOnFinish(),
           );
-        } else if (runtime.compactProgressStreamer.isHolding(sessionId)) {
+        } else if (!compactCardClosed && runtime.compactProgressStreamer.isHolding(sessionId)) {
           runtime.compactProgressStreamer.releaseHold(sessionId);
         }
 
@@ -335,8 +477,20 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
     });
   });
 
-  summaryAggregator.setOnExternalUserInput(async (sessionId, _messageId, messageText) => {
+  summaryAggregator.setOnExternalUserInput(async (sessionId, messageId, messageText) => {
     void runtime.enqueueCompletionTask(sessionId, async () => {
+      // A V2 user message carries the inbox id it waited under.
+      const mirrored = promptQueue.findByInboxId(messageId);
+      if (mirrored) {
+        promptQueue.removeById(mirrored.id);
+        await pickUpInboxPrompt(deps, sessionId, mirrored);
+        return;
+      }
+      // The admission of this prompt may still be on its way back from OpenCode.
+      promptQueue.rememberDeliveredInboxId(messageId);
+      // A prompt handed over at /detach can no longer be withdrawn once picked up.
+      promptHandover.forgetInboxId(messageId);
+
       const destination = policy.getDestination(sessionId);
       if (!destination) {
         return;
@@ -371,6 +525,7 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
     });
 
     if (isCompactProgressMode()) {
+      closeCompactCardBeforeNextActivity(runtime, update.sessionId);
       if (!runtime.runningToolTracker.newestCallId(update.sessionId)) {
         runtime.compactProgressStreamer.updateThinking(update.sessionId);
       }
@@ -382,7 +537,7 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
     }
 
     if (update.isFirstUpdate) {
-      runtime.clearToolTracking(update.sessionId, "thinking_started");
+      runtime.clearToolTracking(update.sessionId, "thinking_started", true);
       void runtime.toolCallStreamer
         .breakSession(update.sessionId, "thinking_started")
         .catch((error) => {

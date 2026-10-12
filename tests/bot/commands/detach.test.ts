@@ -9,6 +9,7 @@ const mocked = vi.hoisted(() => ({
   currentProject: { id: "project-1", worktree: "D:/repo" } as { id: string; worktree: string } | null,
   currentSession: null as { id: string; title: string; directory: string } | null,
   clearSessionMock: vi.fn(),
+  fetchSessionTitleMock: vi.fn(),
   detachAttachedSessionMock: vi.fn(),
   clearAllInteractionStateMock: vi.fn(),
   pinnedIsInitializedMock: vi.fn(() => true),
@@ -21,6 +22,7 @@ const mocked = vi.hoisted(() => ({
   foregroundMarkIdleMock: vi.fn(),
   assistantClearRunMock: vi.fn(),
   clearPromptResponseModeMock: vi.fn(),
+  handOverPromptQueueMock: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../../../src/app/stores/settings-store.js", () => ({
@@ -30,6 +32,7 @@ vi.mock("../../../src/app/stores/settings-store.js", () => ({
 vi.mock("../../../src/app/services/session-service.js", () => ({
   getCurrentSession: vi.fn(() => mocked.currentSession),
   clearSession: mocked.clearSessionMock,
+  fetchSessionTitle: mocked.fetchSessionTitleMock,
 }));
 
 vi.mock("../../../src/app/services/attach-service.js", () => ({
@@ -38,6 +41,10 @@ vi.mock("../../../src/app/services/attach-service.js", () => ({
 
 vi.mock("../../../src/bot/handlers/prompt.js", () => ({
   clearPromptResponseMode: mocked.clearPromptResponseModeMock,
+}));
+
+vi.mock("../../../src/bot/handlers/prompt-handover.js", () => ({
+  handOverPromptQueue: mocked.handOverPromptQueueMock,
 }));
 
 function createDeps() {
@@ -77,6 +84,8 @@ describe("bot/commands/detach", () => {
     };
 
     mocked.clearSessionMock.mockClear();
+    mocked.fetchSessionTitleMock.mockReset();
+    mocked.fetchSessionTitleMock.mockImplementation(async (session: { title: string }) => session.title);
     mocked.detachAttachedSessionMock.mockClear();
     mocked.clearAllInteractionStateMock.mockClear();
     mocked.pinnedIsInitializedMock.mockClear();
@@ -94,6 +103,20 @@ describe("bot/commands/detach", () => {
     mocked.foregroundMarkIdleMock.mockClear();
     mocked.assistantClearRunMock.mockClear();
     mocked.clearPromptResponseModeMock.mockClear();
+    mocked.handOverPromptQueueMock.mockClear();
+  });
+
+  it("hands waiting messages over to the session before clearing it, so none is withdrawn", async () => {
+    await detachCommand(createContext() as never, createDeps());
+
+    expect(mocked.handOverPromptQueueMock).toHaveBeenCalledWith({
+      id: "session-1",
+      title: "Long Run",
+      directory: "D:/repo",
+    });
+    expect(defined(mocked.handOverPromptQueueMock.mock.invocationCallOrder[0])).toBeLessThan(
+      defined(mocked.clearSessionMock.mock.invocationCallOrder[0]),
+    );
   });
 
   it("detaches selected session locally without stopping the OpenCode session", async () => {
@@ -139,6 +162,39 @@ describe("bot/commands/detach", () => {
     );
   });
 
+  it("names the session with the title OpenCode has for it before detaching", async () => {
+    mocked.currentSession = { id: "session-1", title: "", directory: "D:/repo" };
+    mocked.fetchSessionTitleMock.mockResolvedValue("Generated title");
+    const ctx = createContext();
+
+    await detachCommand(ctx as never, createDeps());
+
+    expect(mocked.fetchSessionTitleMock).toHaveBeenCalledWith({
+      id: "session-1",
+      title: "",
+      directory: "D:/repo",
+    });
+    expect(defined(mocked.fetchSessionTitleMock.mock.invocationCallOrder[0])).toBeLessThan(
+      defined(mocked.clearSessionMock.mock.invocationCallOrder[0]),
+    );
+    expect(ctx.reply).toHaveBeenCalledWith(
+      t("detach.success", { title: "Generated title" }),
+      expect.any(Object),
+    );
+  });
+
+  it("names a session OpenCode has not named yet as a new session", async () => {
+    mocked.fetchSessionTitleMock.mockResolvedValue("");
+    const ctx = createContext();
+
+    await detachCommand(ctx as never, createDeps());
+
+    expect(ctx.reply).toHaveBeenCalledWith(
+      t("detach.success", { title: t("pinned.default_session_title") }),
+      expect.any(Object),
+    );
+  });
+
   it("returns a no-op message when no session is selected", async () => {
     mocked.currentSession = null;
     const ctx = createContext();
@@ -146,6 +202,7 @@ describe("bot/commands/detach", () => {
     await detachCommand(ctx as never, createDeps());
 
     expect(ctx.reply).toHaveBeenCalledWith(t("detach.no_active_session"));
+    expect(mocked.handOverPromptQueueMock).not.toHaveBeenCalled();
     expect(mocked.detachAttachedSessionMock).not.toHaveBeenCalled();
     expect(mocked.clearSessionMock).not.toHaveBeenCalled();
   });

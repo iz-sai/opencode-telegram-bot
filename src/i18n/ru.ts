@@ -26,6 +26,7 @@ export const ru: I18nDictionary = {
   "cmd.description.mcps": "MCP серверы",
   "cmd.description.opencode_start": "Запустить OpenCode сервер",
   "cmd.description.opencode_stop": "Остановить OpenCode сервер",
+  "cmd.description.reload": "Перезагрузить конфигурацию OpenCode",
   "cmd.description.ls": "Список содержимого каталога",
   "cmd.description.help": "Справка",
 
@@ -91,6 +92,10 @@ export const ru: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ Активная сессия не соответствует выбранному проекту, поэтому была сброшена. Используйте /sessions для выбора или /new для создания новой сессии.",
   "bot.prompt_send_error": "Не удалось отправить запрос в OpenCode.",
+  "bot.project_folder_missing":
+    "🚫 Папка проекта больше не существует: {path}. Выберите другой проект в /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 Папка проекта больше не существует: {path}. Выберите другой worktree в /worktree.",
   "bot.session_error": "🔴 OpenCode вернул ошибку: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ Последний ответ ассистента не удалось доставить. Отправьте сообщение ещё раз, если оно ещё нужно.",
@@ -175,6 +180,8 @@ export const ru: I18nDictionary = {
   "settings.prompt_queue.label": "Очередь сообщений",
   "settings.value.on": "Вкл",
   "settings.value.off": "Выкл",
+  "settings.prompt_queue.queue": "Очередь",
+  "settings.prompt_queue.steer": "Стир",
   "settings.saved": "✅ Настройка сохранена.",
 
   "projects.empty":
@@ -308,6 +315,10 @@ export const ru: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode Server успешно остановлен",
   "opencode_stop.error":
     "🔴 Произошла ошибка при остановке сервера.\n\nПроверьте логи приложения для подробностей.",
+  "reload.reloading": "🔄 Перезагружаю конфигурацию OpenCode...",
+  "reload.success": "✅ Конфигурация OpenCode перезагружена",
+  "reload.failed": "🔴 Не удалось перезагрузить конфигурацию OpenCode",
+  "reload.failed_with_error": "🔴 Не удалось перезагрузить конфигурацию OpenCode\n\nОшибка: {error}",
 
   "agent.changed_message": "✅ Агент изменен на: {name}",
   "agent.change_error_callback": "Ошибка при смене агента",
@@ -380,7 +391,6 @@ export const ru: I18nDictionary = {
   "permission.reply.once": "Разрешено однократно",
   "permission.reply.always": "Разрешено всегда",
   "permission.reply.reject": "Отклонено",
-  "permission.send_reply_error": "❌ Не удалось отправить ответ на запрос разрешения",
   "permission.blocked.expected_reply": "⚠️ Сначала ответьте на запрос разрешения кнопками выше.",
   "permission.blocked.command_not_allowed":
     "⚠️ Эта команда недоступна, пока вы не ответите на запрос разрешения.",
@@ -389,6 +399,13 @@ export const ru: I18nDictionary = {
   "permission.button.allow": "✅ Разрешить один раз",
   "permission.button.always": "🔓 Разрешить всегда",
   "permission.button.reject": "❌ Отклонить",
+  "permission.outcome.once": "✅ Разрешено однократно",
+  "permission.outcome.always": "🔓 Разрешено всегда",
+  "permission.outcome.reject": "❌ Отклонено",
+  "permission.outcome.outside_suffix": " · ответ дан вне Telegram",
+  "permission.outcome.settled_outside": "☑️ Ответ дан вне Telegram",
+  "permission.outcome.not_answered": "⏹ Без ответа",
+  "permission.delivery_failed": "⚠️ Ответ не дошёл до OpenCode — нажмите ещё раз",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Edit",
   "permission.name.write": "Write",
@@ -407,11 +424,11 @@ export const ru: I18nDictionary = {
   "question.select_one_required_callback": "Выберите хотя бы один вариант",
   "question.enter_custom_callback": "Введите свой ответ сообщением",
   "question.cancelled": "❌ Опрос отменен",
+  "question.settled_outside.answered": "☑️ Ответ дан вне Telegram",
+  "question.settled_outside.cancelled": "❌ Отменено вне Telegram",
+  "question.not_answered": "⏹ Без ответа",
   "question.answer_already_received": "Ответ уже получен, подождите...",
   "question.completed_no_answers": "✅ Опрос завершен (без ответов)",
-  "question.no_active_project": "❌ Нет активного проекта",
-  "question.no_active_request": "❌ Нет активного запроса",
-  "question.send_answers_error": "❌ Не удалось отправить ответы агенту",
   "question.multi_hint": "\n(Можно выбрать несколько вариантов)",
   "question.button.submit": "✅ Готово",
   "question.button.custom": "🔤 Свой ответ",
@@ -433,6 +450,7 @@ export const ru: I18nDictionary = {
   "queue.media_limit": "⚠️ Медиа в очереди ограничены {maxSizeMb} MiB. Дождитесь отправки элемента и повторите попытку.",
   "queue.removed": "🗑 Сообщение удалено из очереди.",
   "queue.not_found": "Этого сообщения больше нет в очереди.",
+  "queue.steer_added": "📥 Добавлено в текущую задачу ({count}/{max}).",
   "queue.disabled_hint": "Очередь сообщений включается в /settings.",
   "keyboard.updated": "⌨️ Клавиатура обновлена",
 
@@ -450,9 +468,12 @@ export const ru: I18nDictionary = {
   "subagent.line.status": "Статус: {status}",
   "subagent.line.task": "Задача: {task}",
   "subagent.line.agent": "Агент: {agent}",
+  "subagent.starting": "Запуск задачи: {task}",
+  "subagent.starting_untitled": "Запуск задачи...",
   "subagent.working": "В работе...",
   "subagent.working_with_details": "В работе: {details}",
   "subagent.completed": "Завершена",
+  "subagent.interrupted": "Прервана",
   "subagent.failed": "Ошибка задачи",
   "subagent.status.pending": "ожидание",
   "subagent.status.running": "в работе",
@@ -485,6 +506,16 @@ export const ru: I18nDictionary = {
     "Введите логин OpenCode сервера (опционально).\nНажмите Enter для значения по умолчанию: {defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "Введите пароль OpenCode сервера (опционально).\nНажмите Enter, чтобы оставить пустым.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Выберите версию сервера OpenCode:\n1 - OpenCode V1 (1.x, npm-пакет opencode-ai)\n2 - OpenCode V2 (2.x, npm-пакет @opencode/cli)\nНажмите Enter, чтобы использовать значение по умолчанию: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid":
+    "Введите 1 или 2 либо нажмите Enter для значения по умолчанию.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Введите пароль сервера OpenCode V2 (обязательно).\nПоказать его: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "Для OpenCode V2 пароль обязателен. Попробуйте ещё раз.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Введите пароль сервера OpenCode.\nНажмите Enter, чтобы оставить сохранённый пароль.\n> ",
   "runtime.wizard.api_url_invalid":
     "Введите корректный URL (http/https) или нажмите Enter для значения по умолчанию.\n",
   "runtime.wizard.start": "Настройка OpenCode Telegram Bot.\n",
@@ -541,6 +572,7 @@ export const ru: I18nDictionary = {
   "task.kind.once": "однократная",
   "task.run.success": "⏰ Задача по расписанию выполнена: {description}",
   "task.run.error": "🔴 Ошибка выполнения задачи по расписанию: {description}\n\nОшибка: {error}",
+  "task.run.error.folder_missing": "Папка проекта больше не существует: {path}",
   "task.run.error.interactive_question":
     "Задача по расписанию задала интерактивный вопрос и не может продолжить выполнение без участия пользователя.",
   "task.run.error.interactive_permission":

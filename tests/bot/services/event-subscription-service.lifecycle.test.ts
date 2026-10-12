@@ -111,10 +111,17 @@ function emitAssistantCompleted(aggregator: Aggregator): void {
   } as unknown as Event);
 }
 
-function emitSessionIdle(aggregator: Aggregator): void {
+function emitSessionIdle(aggregator: Aggregator, options: { interrupted?: boolean } = {}): void {
   aggregator.processEvent({
     type: "session.idle",
-    properties: { sessionID: "session-1" },
+    properties: { sessionID: "session-1", ...(options.interrupted ? { interrupted: true } : {}) },
+  } as unknown as Event);
+}
+
+function emitSessionBusy(aggregator: Aggregator): void {
+  aggregator.processEvent({
+    type: "session.status",
+    properties: { sessionID: "session-1", status: { type: "busy" } },
   } as unknown as Event);
 }
 
@@ -506,6 +513,157 @@ describe("bot/services/event-subscription-service lifecycle", () => {
       );
 
       expect(findFooterCalls(api)).toHaveLength(0);
+    }, 30_000);
+  });
+
+  describe("footer of a turn the bot did not start", () => {
+    async function setup(
+      options: { showAssistantRunFooter?: boolean; startAssistantRun?: boolean } = {},
+    ): Promise<{ api: FakeBotApi; summaryAggregator: Aggregator }> {
+      return setupService({
+        showAssistantRunFooter: options.showAssistantRunFooter ?? true,
+        ...(options.startAssistantRun ? { startAssistantRun: true } : {}),
+      });
+    }
+
+    async function answerTurn(api: FakeBotApi, summaryAggregator: Aggregator): Promise<void> {
+      emitAssistantTextPart(summaryAggregator, "Command finished");
+      emitAssistantCompleted(summaryAggregator);
+      await vi.waitFor(
+        () => {
+          expect(collectSentTexts(api).some((text) => text.includes("Command finished"))).toBe(
+            true,
+          );
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+    }
+
+    it("sends one footer timed from the moment the session went busy", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-28T10:00:00Z"));
+      const { api, summaryAggregator } = await setup();
+
+      emitSessionBusy(summaryAggregator);
+      vi.setSystemTime(new Date("2026-09-28T10:01:00Z"));
+      await answerTurn(api, summaryAggregator);
+      vi.setSystemTime(new Date("2026-09-28T10:01:05Z"));
+      emitSessionIdle(summaryAggregator);
+
+      await vi.waitFor(
+        () => {
+          expect(findFooterCalls(api)).toHaveLength(1);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+      expect(String(findFooterCalls(api)[0]?.[1])).toContain("🕒 1m 5s");
+      expect(activeContainer.assistantRunState.hasRun("session-1")).toBe(false);
+    }, 30_000);
+
+    it("keeps the start of a run the bot opened itself", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-28T10:00:00Z"));
+      const { api, summaryAggregator } = await setup({ startAssistantRun: true });
+
+      vi.setSystemTime(new Date("2026-09-28T10:00:05Z"));
+      emitSessionBusy(summaryAggregator);
+      await answerTurn(api, summaryAggregator);
+      vi.setSystemTime(new Date("2026-09-28T10:00:15Z"));
+      emitSessionIdle(summaryAggregator);
+
+      await vi.waitFor(
+        () => {
+          expect(findFooterCalls(api)).toHaveLength(1);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+      expect(String(findFooterCalls(api)[0]?.[1])).toContain("🕒 16s");
+    }, 30_000);
+
+    it("sends no footer when the turn's start was never seen", async () => {
+      const { api, summaryAggregator } = await setup();
+
+      await answerTurn(api, summaryAggregator);
+      emitSessionIdle(summaryAggregator);
+      await settle();
+
+      expect(findFooterCalls(api)).toHaveLength(0);
+    }, 30_000);
+
+    it("sends no footer when the footer is turned off", async () => {
+      const { api, summaryAggregator } = await setup({ showAssistantRunFooter: false });
+
+      emitSessionBusy(summaryAggregator);
+      await answerTurn(api, summaryAggregator);
+      emitSessionIdle(summaryAggregator);
+      await settle();
+
+      expect(findFooterCalls(api)).toHaveLength(0);
+    }, 30_000);
+
+    it("sends no footer for a turn that ended with a session error", async () => {
+      const { api, summaryAggregator } = await setup();
+
+      emitSessionBusy(summaryAggregator);
+      await answerTurn(api, summaryAggregator);
+      emitSessionError(summaryAggregator, "Provider failed");
+      emitSessionIdle(summaryAggregator);
+      await settle();
+
+      expect(findFooterCalls(api)).toHaveLength(0);
+      expect(activeContainer.assistantRunState.hasRun("session-1")).toBe(false);
+    }, 30_000);
+
+    it("sends no footer for a turn stopped from an attached client", async () => {
+      const { api, summaryAggregator } = await setup();
+
+      emitSessionBusy(summaryAggregator);
+      await answerTurn(api, summaryAggregator);
+      emitSessionIdle(summaryAggregator, { interrupted: true });
+      await settle();
+
+      expect(findFooterCalls(api)).toHaveLength(0);
+      expect(activeContainer.assistantRunState.hasRun("session-1")).toBe(false);
+    }, 30_000);
+
+    it("still sends the footer of a bot run stopped from an attached client", async () => {
+      const { api, summaryAggregator } = await setup({ startAssistantRun: true });
+
+      emitSessionBusy(summaryAggregator);
+      await answerTurn(api, summaryAggregator);
+      emitSessionIdle(summaryAggregator, { interrupted: true });
+
+      await vi.waitFor(
+        () => {
+          expect(findFooterCalls(api)).toHaveLength(1);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+    }, 30_000);
+
+    it("forgets the running turn when the event stream reconnects", async () => {
+      const { summaryAggregator } = await setup();
+      const onReconnect = mocked.subscribeToEvents.mock.calls.at(-1)?.[2] as (info: {
+        serverRestarted: boolean | null;
+      }) => void;
+
+      emitSessionBusy(summaryAggregator);
+      onReconnect({ serverRestarted: null });
+
+      expect(activeContainer.summaryAggregator.getLiveTurnStartedAt("session-1")).toBeNull();
+    }, 30_000);
+
+    it("opens no run for a reply that completes after its turn went idle", async () => {
+      const { api, summaryAggregator } = await setup();
+
+      emitSessionBusy(summaryAggregator);
+      emitSessionIdle(summaryAggregator);
+      await answerTurn(api, summaryAggregator);
+      emitSessionIdle(summaryAggregator);
+      await settle();
+
+      expect(findFooterCalls(api)).toHaveLength(0);
+      expect(activeContainer.assistantRunState.hasRun("session-1")).toBe(false);
     }, 30_000);
   });
 
@@ -908,5 +1066,119 @@ describe("bot/services/event-subscription-service lifecycle", () => {
 
       expect(api.sendMessage).not.toHaveBeenCalled();
     });
+  });
+
+  describe("prompt picked up from the OpenCode V2 inbox", () => {
+    async function mirrorInboxPrompt(delivery: "steer" | "queue"): Promise<void> {
+      const { promptQueue } = await import("../../../src/app/managers/prompt-queue-manager.js");
+      promptQueue.confirmReservation(promptQueue.reserve()!, {
+        displayText: "photo caption",
+        inbox: { sessionId: "session-1", inboxId: "user-message-1", delivery },
+      });
+    }
+
+    it("drops the button and quotes a steered prompt inside the running run", async () => {
+      const { api, summaryAggregator } = await setupService({
+        startAssistantRun: true,
+        showAssistantRunFooter: true,
+      });
+      await mirrorInboxPrompt("steer");
+      const { promptQueue } = await import("../../../src/app/managers/prompt-queue-manager.js");
+
+      emitExternalUserMessage(summaryAggregator, "See attached file");
+      await vi.waitFor(
+        () => {
+          expect(collectSentTexts(api).some((text) => text.includes("photo caption"))).toBe(true);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+
+      expect(promptQueue.size()).toBe(0);
+      expect(collectSentTexts(api).some((text) => text.includes("See attached file"))).toBe(false);
+      expect(findFooterCalls(api)).toHaveLength(0);
+      expect(activeContainer.assistantRunState.hasRun("session-1")).toBe(true);
+    }, 30_000);
+
+    it("closes the answered run with its footer and opens a new one for a queued prompt", async () => {
+      const { api, summaryAggregator } = await setupService({
+        startAssistantRun: true,
+        showAssistantRunFooter: true,
+      });
+      await mirrorInboxPrompt("queue");
+      const { assistantRunState } = activeContainer;
+      assistantRunState.markResponseCompleted("session-1", {
+        agent: "test-agent",
+        providerID: "test-provider",
+        modelID: "test-model",
+      });
+
+      emitExternalUserMessage(summaryAggregator, "Next task");
+      await vi.waitFor(
+        () => {
+          expect(collectSentTexts(api).some((text) => text.includes("photo caption"))).toBe(true);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+
+      expect(findFooterCalls(api)).toHaveLength(1);
+      expect(assistantRunState.hasRun("session-1")).toBe(true);
+      expect(assistantRunState.isResponseCompleted("session-1")).toBe(false);
+      expect(activeContainer.foregroundSessionState.isBusy()).toBe(true);
+    }, 30_000);
+
+    it("opens a steered prompt's own run in place of a turn the bot did not start", async () => {
+      const { summaryAggregator } = await setupService({ showAssistantRunFooter: true });
+      const { assistantRunState, foregroundSessionState } = activeContainer;
+      assistantRunState.startObservedRun("session-1", Date.now());
+      await mirrorInboxPrompt("steer");
+
+      emitExternalUserMessage(summaryAggregator, "Hi");
+      await vi.waitFor(
+        () => {
+          expect(assistantRunState.hasBotRun("session-1")).toBe(true);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+
+      expect(foregroundSessionState.isBusy()).toBe(true);
+    }, 30_000);
+
+    it("closes a turn the bot did not start with its footer before a queued prompt", async () => {
+      const { api, summaryAggregator } = await setupService({ showAssistantRunFooter: true });
+      const { assistantRunState } = activeContainer;
+      assistantRunState.startObservedRun("session-1", Date.now());
+      assistantRunState.markResponseCompleted("session-1", {
+        agent: "test-agent",
+        providerID: "test-provider",
+        modelID: "test-model",
+      });
+      await mirrorInboxPrompt("queue");
+
+      emitExternalUserMessage(summaryAggregator, "Next task");
+      await vi.waitFor(
+        () => {
+          expect(assistantRunState.hasBotRun("session-1")).toBe(true);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+
+      expect(findFooterCalls(api)).toHaveLength(1);
+      expect(assistantRunState.isResponseCompleted("session-1")).toBe(false);
+    }, 30_000);
+
+    it("remembers a user message that matches no waiting prompt", async () => {
+      const { api, summaryAggregator } = await setupService();
+      const { promptQueue } = await import("../../../src/app/managers/prompt-queue-manager.js");
+
+      emitExternalUserMessage(summaryAggregator, "From the CLI");
+      await vi.waitFor(
+        () => {
+          expect(collectSentTexts(api).some((text) => text.includes("From the CLI"))).toBe(true);
+        },
+        { timeout: STREAM_WAIT_TIMEOUT_MS },
+      );
+
+      expect(promptQueue.wasInboxIdDelivered("user-message-1")).toBe(true);
+    }, 30_000);
   });
 });

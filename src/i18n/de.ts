@@ -26,6 +26,7 @@ export const de: I18nDictionary = {
   "cmd.description.mcps": "MCP servers",
   "cmd.description.opencode_start": "OpenCode-Server starten",
   "cmd.description.opencode_stop": "OpenCode-Server stoppen",
+  "cmd.description.reload": "Reload OpenCode configuration",
   "cmd.description.ls": "Verzeichnisinhalt auflisten",
   "cmd.description.help": "Hilfe",
 
@@ -95,6 +96,10 @@ export const de: I18nDictionary = {
   "bot.session_reset_project_mismatch":
     "⚠️ Die aktive Sitzung passt nicht zum ausgewählten Projekt und wurde daher zurückgesetzt. Nutze /sessions zur Auswahl oder /new, um eine neue Sitzung zu erstellen.",
   "bot.prompt_send_error": "Anfrage konnte nicht an OpenCode gesendet werden.",
+  "bot.project_folder_missing":
+    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+  "bot.project_folder_missing_worktree":
+    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
   "bot.session_error": "🔴 OpenCode meldete einen Fehler: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
@@ -184,6 +189,8 @@ export const de: I18nDictionary = {
   "settings.prompt_queue.label": "Nachrichtenwarteschlange",
   "settings.value.on": "Ein",
   "settings.value.off": "Aus",
+  "settings.prompt_queue.queue": "Queue",
+  "settings.prompt_queue.steer": "Steer",
   "settings.saved": "✅ Einstellung gespeichert.",
 
   "projects.empty":
@@ -322,6 +329,10 @@ export const de: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode-Server erfolgreich gestoppt",
   "opencode_stop.error":
     "🔴 Beim Stoppen des Servers ist ein Fehler aufgetreten.\n\nSiehe Anwendungslogs für Details.",
+  "reload.reloading": "🔄 Reloading OpenCode configuration...",
+  "reload.success": "✅ OpenCode configuration reloaded",
+  "reload.failed": "🔴 Failed to reload OpenCode configuration",
+  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
 
   "agent.changed_message": "✅ Agent geändert zu: {name}",
   "agent.change_error_callback": "Agent konnte nicht geändert werden",
@@ -395,7 +406,6 @@ export const de: I18nDictionary = {
   "permission.reply.once": "Einmal erlaubt",
   "permission.reply.always": "Immer erlaubt",
   "permission.reply.reject": "Abgelehnt",
-  "permission.send_reply_error": "❌ Antwort auf Berechtigungsanfrage konnte nicht gesendet werden",
   "permission.blocked.expected_reply":
     "⚠️ Bitte beantworte zuerst die Berechtigungsanfrage mit den Buttons oben.",
   "permission.blocked.command_not_allowed":
@@ -405,6 +415,13 @@ export const de: I18nDictionary = {
   "permission.button.allow": "✅ Einmal erlauben",
   "permission.button.always": "🔓 Immer erlauben",
   "permission.button.reject": "❌ Ablehnen",
+  "permission.outcome.once": "✅ Allowed once",
+  "permission.outcome.always": "🔓 Allowed always",
+  "permission.outcome.reject": "❌ Rejected",
+  "permission.outcome.outside_suffix": " · answered outside Telegram",
+  "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
+  "permission.outcome.not_answered": "⏹ Not answered",
+  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Bearbeiten",
   "permission.name.write": "Schreiben",
@@ -423,11 +440,11 @@ export const de: I18nDictionary = {
   "question.select_one_required_callback": "Wähle mindestens eine Option",
   "question.enter_custom_callback": "Sende deine eigene Antwort als Nachricht",
   "question.cancelled": "❌ Umfrage abgebrochen",
+  "question.settled_outside.answered": "☑️ Answered outside Telegram",
+  "question.settled_outside.cancelled": "❌ Cancelled outside Telegram",
+  "question.not_answered": "⏹ Not answered",
   "question.answer_already_received": "Antwort bereits erhalten, bitte warten...",
   "question.completed_no_answers": "✅ Umfrage abgeschlossen (keine Antworten)",
-  "question.no_active_project": "❌ Kein aktives Projekt",
-  "question.no_active_request": "❌ Keine aktive Anfrage",
-  "question.send_answers_error": "❌ Antworten konnten nicht an den Agenten gesendet werden",
   "question.multi_hint": "\n(Du kannst mehrere Optionen auswählen)",
   "question.button.submit": "✅ Fertig",
   "question.button.custom": "🔤 Eigene Antwort",
@@ -451,6 +468,7 @@ export const de: I18nDictionary = {
     "⚠️ Die Warteschlange ist voll ({max}). Entferne eine Nachricht oder warte, bis die aktuelle Aufgabe abgeschlossen ist.",
   "queue.removed": "🗑 Nachricht aus der Warteschlange entfernt.",
   "queue.not_found": "Diese Nachricht ist nicht mehr in der Warteschlange.",
+  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
   "queue.disabled_hint": "Die Nachrichtenwarteschlange lässt sich in /settings aktivieren.",
   "keyboard.updated": "⌨️ Tastatur aktualisiert",
 
@@ -468,9 +486,12 @@ export const de: I18nDictionary = {
   "subagent.line.status": "Status: {status}",
   "subagent.line.task": "Aufgabe: {task}",
   "subagent.line.agent": "Agent: {agent}",
+  "subagent.starting": "Starting task: {task}",
+  "subagent.starting_untitled": "Starting task...",
   "subagent.working": "Arbeitet...",
   "subagent.working_with_details": "Arbeitet: {details}",
   "subagent.completed": "Abgeschlossen",
+  "subagent.interrupted": "Interrupted",
   "subagent.failed": "Aufgabe fehlgeschlagen",
   "subagent.status.pending": "ausstehend",
   "subagent.status.running": "laeuft",
@@ -504,6 +525,15 @@ export const de: I18nDictionary = {
     "OpenCode-Server-Benutzername eingeben (optional).\nEnter drücken für Standard: {defaultUsername}\n> ",
   "runtime.wizard.ask_server_password":
     "OpenCode-Server-Passwort eingeben (optional).\nEnter drücken, um es leer zu lassen.\n> ",
+  "runtime.wizard.ask_server_version":
+    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+  "runtime.wizard.ask_server_password_required":
+    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+  "runtime.wizard.server_password_required":
+    "The password is required for OpenCode V2. Please try again.\n",
+  "runtime.wizard.ask_server_password_keep":
+    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
   "runtime.wizard.api_url_invalid":
     "Gib eine gültige URL (http/https) ein oder drücke Enter für Standard.\n",
   "runtime.wizard.start": "OpenCode Telegram Bot Einrichtung.\n",
@@ -560,6 +590,7 @@ export const de: I18nDictionary = {
   "task.kind.once": "einmalig",
   "task.run.success": "⏰ Geplante Aufgabe abgeschlossen: {description}",
   "task.run.error": "🔴 Geplante Aufgabe fehlgeschlagen: {description}\n\nFehler: {error}",
+  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
   "task.run.error.interactive_question":
     "Die geplante Aufgabe hat eine interaktive Frage gestellt und kann unbeaufsichtigt nicht fortfahren.",
   "task.run.error.interactive_permission":

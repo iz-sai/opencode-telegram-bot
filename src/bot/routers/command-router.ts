@@ -5,6 +5,7 @@ import { switchCommand } from "../commands/switch-command.js";
 import { settingsCommand } from "../commands/settings-command.js";
 import { opencodeStartCommand } from "../commands/opencode-start-command.js";
 import { opencodeStopCommand } from "../commands/opencode-stop-command.js";
+import { reloadCommand } from "../commands/reload-command.js";
 import { projectsCommand } from "../commands/projects-command.js";
 import { worktreeCommand } from "../commands/worktree-command.js";
 import { openCommand } from "../commands/open-command.js";
@@ -26,6 +27,7 @@ import { startCommand } from "../commands/start-command.js";
 import { helpCommand } from "../commands/help-command.js";
 import { statusCommand } from "../commands/status-command.js";
 import { BOT_COMMANDS } from "../commands/definitions.js";
+import { isKnownCommand } from "./command-utils.js";
 import { logger } from "../../utils/logger.js";
 import { flushPendingPrompt } from "../handlers/message-merger.js";
 import {
@@ -92,6 +94,9 @@ export function registerCommandRouter(bot: Bot<Context>, deps: CommandRouterDeps
   bot.command("settings", (ctx) => settingsCommand(ctx, container));
   bot.command("opencode_start", (ctx) => opencodeStartCommand(ctx, container));
   bot.command("opencode_stop", (ctx) => opencodeStopCommand(ctx, container));
+  if (isKnownCommand("reload")) {
+    bot.command("reload", (ctx) => reloadCommand(ctx, container));
+  }
   bot.command("projects", (ctx) => projectsCommand(ctx, container));
   bot.command("worktree", (ctx) => worktreeCommand(ctx, container));
   bot.command("open", (ctx) => openCommand(ctx, container));

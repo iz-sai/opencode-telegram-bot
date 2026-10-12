@@ -1,14 +1,25 @@
 import type { Context } from "grammy";
 import type { AppContainer } from "../../app/bootstrap/app-container.js";
+import { opencodeClient } from "../../opencode/client.js";
+import { getCurrentProject } from "../../app/stores/settings-store.js";
+import { getCurrentSession } from "../../app/services/session-service.js";
 import {
   clearQuestionInteraction,
+  closeQuestionCancelled,
+  closeQuestionSettledOutside,
+  isQuestionRequestGone,
+  showCurrentQuestion,
   showNextQuestion,
+  showQuestionDeliveryWarning,
+  submitPollAnswers,
   syncQuestionInteractionState,
   updateQuestionMessage,
+  type QuestionReplyResult,
 } from "../menus/question-menu.js";
 import { t } from "../../i18n/index.js";
 import { logger } from "../../utils/logger.js";
-import { alert, cancelPrompt } from "./feedback.js";
+import { safeBackgroundTask } from "../../utils/safe-background-task.js";
+import { alert } from "./feedback.js";
 
 export type QuestionCallbackDeps = Pick<
   AppContainer,
@@ -23,6 +34,11 @@ function getCallbackMessageId(ctx: Context): number | null {
 
   const messageId = (message as { message_id?: number }).message_id;
   return typeof messageId === "number" ? messageId : null;
+}
+
+/** The poll's last question: answering it sends the whole poll to OpenCode. */
+function isLastQuestion(deps: QuestionCallbackDeps, questionIndex: number): boolean {
+  return questionIndex === deps.questionManager.getTotalQuestions() - 1;
 }
 
 export async function handleQuestionCallback(
@@ -49,6 +65,14 @@ export async function handleQuestionCallback(
     await ctx.answerCallbackQuery({ text: t("question.inactive_callback"), show_alert: true });
     return true;
   }
+
+  if (deps.questionManager.isSettlingFromTelegram()) {
+    // The answers or the dismissal are on their way: no button does anything until they land.
+    await ctx.answerCallbackQuery();
+    return true;
+  }
+
+  deps.questionManager.clearLastCancelFailed();
 
   const parts = data.split(":");
   const action = parts[1];
@@ -80,6 +104,9 @@ export async function handleQuestionCallback(
         break;
       case "custom":
         await handleCustomAnswer(ctx, deps, questionIndex);
+        break;
+      case "toggle_custom":
+        await handleToggleCustomAnswer(ctx, deps, questionIndex);
         break;
       case "cancel":
         await handleCancelPoll(ctx, deps);
@@ -137,13 +164,13 @@ async function handleSelectOption(
     await ctx.answerCallbackQuery();
   } else {
     logger.debug("[QuestionHandler] Single choice mode, moving to next question");
+    const requestID = deps.questionManager.getRequestID();
     await ctx.answerCallbackQuery();
 
     const answer = deps.questionManager.getSelectedAnswer(questionIndex);
     logger.debug(`[QuestionHandler] Selected answer for question ${questionIndex}: ${answer}`);
 
-    await ctx.deleteMessage().catch(() => {});
-    await showNextQuestion(ctx, deps);
+    await answerStep(ctx, deps, questionIndex, requestID);
   }
 }
 
@@ -162,9 +189,7 @@ async function handleSubmitAnswer(
     );
   }
 
-  const answer = deps.questionManager.getSelectedAnswer(questionIndex);
-
-  if (!answer) {
+  if (!deps.questionManager.hasAnswer(questionIndex)) {
     await ctx.answerCallbackQuery({
       text: t("question.select_one_required_callback"),
       show_alert: true,
@@ -172,9 +197,38 @@ async function handleSubmitAnswer(
     return;
   }
 
-  logger.debug(`[QuestionHandler] Submit answer for question ${questionIndex}: ${answer}`);
+  logger.debug(
+    `[QuestionHandler] Submit answer for question ${questionIndex}: ${deps.questionManager.getAnswerItems(questionIndex).join(" | ")}`,
+  );
 
+  const requestID = deps.questionManager.getRequestID();
   await ctx.answerCallbackQuery();
+  await answerStep(ctx, deps, questionIndex, requestID);
+}
+
+/**
+ * A question was answered: the last one sends the poll's answers and stays on screen until
+ * OpenCode takes them, an earlier one gives way to the next question. A poll that was closed
+ * while the tap was being acknowledged (settled outside Telegram, a reset) is left as it is.
+ */
+async function answerStep(
+  ctx: Context,
+  deps: QuestionCallbackDeps,
+  questionIndex: number,
+  requestID: string | null,
+): Promise<void> {
+  if (deps.questionManager.getRequestID() !== requestID || !deps.questionManager.isActive()) {
+    logger.info(`[QuestionHandler] Poll closed while its tap was handled: requestID=${requestID}`);
+    return;
+  }
+
+  if (isLastQuestion(deps, questionIndex)) {
+    if (ctx.chat) {
+      await submitPollAnswers(ctx.api, ctx.chat.id, deps);
+    }
+    return;
+  }
+
   await ctx.deleteMessage().catch(() => {});
   await showNextQuestion(ctx, deps);
 }
@@ -198,10 +252,113 @@ async function handleCustomAnswer(
   });
 }
 
-async function handleCancelPoll(ctx: Context, deps: QuestionCallbackDeps): Promise<void> {
-  deps.questionManager.cancel();
+async function handleToggleCustomAnswer(
+  ctx: Context,
+  deps: QuestionCallbackDeps,
+  questionIndex: number,
+): Promise<void> {
+  if (deps.questionManager.isWaitingForCustomInput(questionIndex)) {
+    deps.questionManager.clearCustomInput();
+    syncQuestionInteractionState(
+      "callback",
+      questionIndex,
+      deps.questionManager.getActiveMessageId(),
+      deps,
+    );
+  }
 
-  await cancelPrompt(ctx, "question.cancelled");
+  deps.questionManager.toggleCustomAnswer(questionIndex);
+
+  await updateQuestionMessage(ctx, deps);
+  await ctx.answerCallbackQuery();
+}
+
+async function handleCancelPoll(ctx: Context, deps: QuestionCallbackDeps): Promise<void> {
+  const { questionManager } = deps;
+  const requestID = questionManager.getRequestID();
+  const directory = getCurrentSession()?.directory ?? getCurrentProject()?.worktree;
+  const chatId = ctx.chat?.id;
+
+  if (!requestID || !directory || chatId === undefined) {
+    // Nothing can be sent: the poll stays answerable and says the Cancel did not get through.
+    logger.error("[QuestionHandler] No requestID or project for dismissing the question");
+    await ctx.answerCallbackQuery();
+    if (chatId !== undefined) {
+      await showQuestionDeliveryWarning(ctx.api, chatId, deps);
+    }
+    return;
+  }
+
+  questionManager.startDismissal();
+  syncQuestionInteractionState(
+    "callback",
+    questionManager.getCurrentIndex(),
+    questionManager.getActiveMessageId(),
+    deps,
+  );
+
+  // The dismissal is marked as being sent: a lost toast must not keep it from going out.
+  await ctx.answerCallbackQuery({ text: t("common.cancelled") }).catch((err) => {
+    logger.warn("[QuestionHandler] Failed to answer the cancel callback:", err);
+  });
+
+  logger.info(`[QuestionHandler] Dismissing question via question.reject: requestID=${requestID}`);
+
+  safeBackgroundTask({
+    taskName: "question.reject",
+    task: async (): Promise<QuestionReplyResult> => {
+      const { error } = await opencodeClient.question.reject({ requestID, directory });
+      if (!error) {
+        return "accepted";
+      }
+
+      if (isQuestionRequestGone(error)) {
+        logger.debug(`[QuestionHandler] Question already settled: requestID=${requestID}`);
+        return "gone";
+      }
+
+      logger.error(`[QuestionHandler] Failed to dismiss question: requestID=${requestID}`, error);
+      return "failed";
+    },
+    onSuccess: (result) => finishDismissal(ctx.api, chatId, deps, requestID, result),
+    onError: () => finishDismissal(ctx.api, chatId, deps, requestID, "failed"),
+  });
+}
+
+/**
+ * Ends the poll once OpenCode answered the dismissal, or leaves it answerable with a
+ * warning when the dismissal did not get through. A poll something else already ended
+ * stays as it is.
+ */
+async function finishDismissal(
+  api: Context["api"],
+  chatId: number,
+  deps: QuestionCallbackDeps,
+  requestID: string,
+  result: QuestionReplyResult,
+): Promise<void> {
+  const { questionManager } = deps;
+  if (!questionManager.isDismissing() || questionManager.getRequestID() !== requestID) {
+    logger.info(`[QuestionHandler] Dismissal finished for a poll already closed: ${requestID}`);
+    return;
+  }
+
+  const settled = questionManager.getSettledWhileSending();
+  logger.info(
+    `[QuestionHandler] Dismissal finished: requestID=${requestID}, result=${result}, settled=${settled ?? "none"}`,
+  );
+
+  if (settled === "answered") {
+    await closeQuestionSettledOutside(api, chatId, "answered", deps);
+  } else if (result === "gone") {
+    await closeQuestionSettledOutside(api, chatId, "cancelled", deps);
+  } else if (result === "accepted" || settled === "cancelled") {
+    // A lost reply still counts when OpenCode reported the question dismissed.
+    await closeQuestionCancelled(api, chatId, deps);
+  } else {
+    questionManager.failDismissal();
+    await showQuestionDeliveryWarning(api, chatId, deps);
+  }
 }
 
 export async function handleQuestionTextAnswer(
@@ -218,7 +375,9 @@ export async function handleQuestionTextAnswer(
     return;
   }
 
-  if (deps.questionManager.hasCustomAnswer(currentIndex)) {
+  const multiple = deps.questionManager.getCurrentQuestion()?.multiple ?? false;
+
+  if (!multiple && deps.questionManager.hasCustomAnswer(currentIndex)) {
     await ctx.reply(t("question.answer_already_received"));
     return;
   }
@@ -228,9 +387,24 @@ export async function handleQuestionTextAnswer(
   deps.questionManager.setCustomAnswer(currentIndex, text);
   deps.questionManager.clearCustomInput();
 
+  if (!multiple && isLastQuestion(deps, currentIndex)) {
+    if (ctx.chat) {
+      await submitPollAnswers(ctx.api, ctx.chat.id, deps);
+    }
+    return;
+  }
+
   const activeMessageId = deps.questionManager.getActiveMessageId();
   if (activeMessageId !== null && ctx.chat) {
     await ctx.api.deleteMessage(ctx.chat.id, activeMessageId).catch(() => {});
+  }
+
+  if (multiple) {
+    // A multi-select question stays open: re-send it below the user's text with the custom row.
+    if (ctx.chat) {
+      await showCurrentQuestion(ctx.api, ctx.chat.id, deps);
+    }
+    return;
   }
 
   await showNextQuestion(ctx, deps);

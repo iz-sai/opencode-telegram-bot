@@ -6,6 +6,7 @@ const mocked = vi.hoisted(() => ({
   getModelSelectionListsMock: vi.fn(),
   getProvidersMock: vi.fn(),
   getProviderModelsMock: vi.fn(),
+  getModelAvailabilityMock: vi.fn(),
   fetchCurrentModelMock: vi.fn(),
   searchModelsMock: vi.fn(),
   interactionManagerGetSnapshotMock: vi.fn(),
@@ -19,7 +20,7 @@ const mocked = vi.hoisted(() => ({
   keyboardUpdateModelMock: vi.fn(),
   keyboardUpdateAgentMock: vi.fn(),
   keyboardUpdateContextMock: vi.fn(),
-  pinnedRefreshContextLimitMock: vi.fn(),
+  pinnedOnModelChangeMock: vi.fn(),
   pinnedGetContextInfoMock: vi.fn(),
   pinnedGetContextLimitMock: vi.fn(),
   createMainKeyboardMock: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../../../src/app/services/model-selection-service.js", () => ({
   getModelSelectionLists: mocked.getModelSelectionListsMock,
   getProviders: mocked.getProvidersMock,
   getProviderModels: mocked.getProviderModelsMock,
+  getModelAvailability: mocked.getModelAvailabilityMock,
   searchModels: mocked.searchModelsMock,
   selectModel: mocked.selectModelMock,
   fetchCurrentModel: mocked.fetchCurrentModelMock,
@@ -89,7 +91,7 @@ function createDeps() {
       updateContext: mocked.keyboardUpdateContextMock,
     } as never,
     pinnedMessageManager: {
-      refreshContextLimit: mocked.pinnedRefreshContextLimitMock,
+      onModelChange: mocked.pinnedOnModelChangeMock,
       getContextInfo: mocked.pinnedGetContextInfoMock,
       getContextLimit: mocked.pinnedGetContextLimitMock,
     } as never,
@@ -120,11 +122,19 @@ function cell(
   return defined(keyboard[row]?.[col], `button[${row}][${col}]`);
 }
 
+function expectDashboardRedrawnBeforeVariantMenu(): void {
+  expect(mocked.pinnedOnModelChangeMock).toHaveBeenCalledOnce();
+  expect(defined(mocked.pinnedOnModelChangeMock.mock.invocationCallOrder[0])).toBeLessThan(
+    defined(mocked.showVariantMenuAfterModelChangeMock.mock.invocationCallOrder[0]),
+  );
+}
+
 describe("bot model selection", () => {
   beforeEach(() => {
     mocked.getModelSelectionListsMock.mockReset();
     mocked.getProvidersMock.mockReset().mockResolvedValue([]);
     mocked.getProviderModelsMock.mockReset().mockResolvedValue([]);
+    mocked.getModelAvailabilityMock.mockReset().mockResolvedValue("offered");
     mocked.fetchCurrentModelMock
       .mockReset()
       .mockReturnValue({ providerID: "openai", modelID: "gpt-4o", variant: "default" });
@@ -141,7 +151,7 @@ describe("bot model selection", () => {
     mocked.keyboardUpdateModelMock.mockReset();
     mocked.keyboardUpdateAgentMock.mockReset();
     mocked.keyboardUpdateContextMock.mockReset();
-    mocked.pinnedRefreshContextLimitMock.mockReset().mockResolvedValue(undefined);
+    mocked.pinnedOnModelChangeMock.mockReset().mockResolvedValue(undefined);
     mocked.pinnedGetContextInfoMock.mockReset().mockReturnValue(null);
     mocked.pinnedGetContextLimitMock.mockReset().mockReturnValue(0);
     mocked.createMainKeyboardMock.mockReset().mockReturnValue({ keyboard: [["main"]] });
@@ -269,6 +279,101 @@ describe("bot model selection", () => {
         "variant menu order",
       );
       expect(replyOrder).toBeLessThan(variantMenuOrder);
+      expectDashboardRedrawnBeforeVariantMenu();
+    });
+
+    it("redraws the menu without selecting a favorite OpenCode no longer offers", async () => {
+      mocked.interactionManagerGetSnapshotMock.mockReturnValue({
+        kind: "inline",
+        metadata: {
+          menuKind: "model",
+          messageId: 999,
+          modelLists: {
+            favorites: [{ providerID: "opencode-go", modelID: "glm-5.3-flash" }],
+            recent: [],
+          },
+        },
+      });
+      mocked.getModelAvailabilityMock.mockResolvedValue("provider-missing");
+      const freshLists = {
+        favorites: [{ providerID: "opencode", modelID: "big-pickle" }],
+        recent: [],
+      };
+      mocked.getModelSelectionListsMock.mockResolvedValue(freshLists);
+
+      const ctx = mockContext({
+        callbackQuery: { data: "model:list:favorites:0", message: { message_id: 999 } },
+        editMessageText: vi.fn().mockResolvedValue(undefined),
+        api: {},
+      });
+
+      const result = await handleModelSelect(ctx, createDeps());
+
+      expect(result).toBe(true);
+      expect(mocked.selectModelMock).not.toHaveBeenCalled();
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith();
+      expect(ctx.editMessageText).toHaveBeenCalledTimes(1);
+      expect(mocked.interactionManagerTransitionMock).toHaveBeenCalledWith({
+        expectedInput: "callback",
+        metadata: { menuKind: "model", messageId: 999, modelLists: freshLists },
+      });
+    });
+
+    it("stays silent when the redraw after a stale tap fails", async () => {
+      mocked.interactionManagerGetSnapshotMock.mockReturnValue({
+        kind: "inline",
+        metadata: {
+          menuKind: "model",
+          messageId: 999,
+          modelLists: {
+            favorites: [{ providerID: "opencode-go", modelID: "glm-5.3-flash" }],
+            recent: [],
+          },
+        },
+      });
+      mocked.getModelAvailabilityMock.mockResolvedValue("model-missing");
+      mocked.getModelSelectionListsMock.mockResolvedValue({ favorites: [], recent: [] });
+
+      const ctx = mockContext({
+        callbackQuery: { data: "model:list:favorites:0", message: { message_id: 999 } },
+        editMessageText: vi.fn().mockRejectedValue(new Error("message is not modified")),
+        api: {},
+      });
+
+      const result = await handleModelSelect(ctx, createDeps());
+
+      expect(result).toBe(true);
+      expect(mocked.selectModelMock).not.toHaveBeenCalled();
+      expect(ctx.reply).not.toHaveBeenCalled();
+    });
+
+    it("selects the model when OpenCode cannot tell whether it is offered", async () => {
+      mocked.interactionManagerGetSnapshotMock.mockReturnValue({
+        kind: "inline",
+        metadata: {
+          menuKind: "model",
+          messageId: 999,
+          modelLists: {
+            favorites: [{ providerID: "openai", modelID: "gpt-4o" }],
+            recent: [],
+          },
+        },
+      });
+      mocked.getModelAvailabilityMock.mockResolvedValue("unknown");
+
+      const ctx = mockContext({
+        callbackQuery: { data: "model:list:favorites:0", message: { message_id: 999 } },
+        api: {},
+      });
+
+      await handleModelSelect(ctx, createDeps());
+
+      expect(mocked.selectModelMock).toHaveBeenCalledWith({
+        providerID: "openai",
+        modelID: "gpt-4o",
+        variant: "default",
+      });
     });
 
     it("rejects stale search result callbacks instead of parsing them as legacy models", async () => {
@@ -544,6 +649,53 @@ describe("bot model selection", () => {
         modelID: longModelID,
         variant: "default",
       }, expect.anything());
+      expectDashboardRedrawnBeforeVariantMenu();
+    });
+
+    it("re-runs the search without selecting a result OpenCode no longer offers", async () => {
+      mocked.interactionManagerGetSnapshotMock.mockReturnValue({
+        kind: "custom",
+        metadata: {
+          flow: "model-search",
+          stage: "results",
+          messageId: 999,
+          query: "glm",
+          models: [
+            { providerID: "opencode-go", modelID: "glm-5.3-flash", variant: "default" },
+            { providerID: "zai", modelID: "glm-5", variant: "default" },
+          ],
+        },
+      });
+      mocked.getModelAvailabilityMock.mockResolvedValue("provider-missing");
+      mocked.searchModelsMock.mockResolvedValue([{ providerID: "zai", modelID: "glm-5" }]);
+
+      const ctx = mockContext({
+        callbackQuery: { data: "model:result:0", message: { message_id: 999 } },
+        editMessageText: vi.fn().mockResolvedValue(undefined),
+        api: {},
+      });
+
+      const result = await handleModelSearchResults(ctx, createDeps());
+
+      expect(result).toBe(true);
+      expect(mocked.selectModelMock).not.toHaveBeenCalled();
+      expect(mocked.interactionManagerClearMock).not.toHaveBeenCalled();
+      expect(mocked.searchModelsMock).toHaveBeenCalledWith("glm");
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(ctx.editMessageText).toHaveBeenCalledWith(
+        expect.stringContaining("glm"),
+        expect.objectContaining({ reply_markup: expect.anything() }),
+      );
+      expect(mocked.interactionManagerTransitionMock).toHaveBeenCalledWith({
+        expectedInput: "callback",
+        metadata: {
+          flow: "model-search",
+          stage: "results",
+          messageId: 999,
+          query: "glm",
+          models: [{ providerID: "zai", modelID: "glm-5", variant: "default" }],
+        },
+      });
     });
 
     it("rejects stale short list callbacks instead of parsing them as legacy models", async () => {
@@ -736,6 +888,8 @@ describe("bot model selection", () => {
           messageId: 999,
           providers,
           providersPage: 1,
+          providerIndex: 0,
+          providerModelsPage: 0,
           models: [
             { providerID: "openai", modelID: "gpt-4o", variant: "default" },
             { providerID: "openai", modelID: "gpt-5", variant: "default" },
@@ -788,6 +942,45 @@ describe("bot model selection", () => {
         modelID: "gpt-5",
         variant: "default",
       }, expect.anything());
+      expectDashboardRedrawnBeforeVariantMenu();
+    });
+
+    it("redraws the provider page without selecting a model OpenCode no longer offers", async () => {
+      const providers = [{ id: "openai", name: "OpenAI", modelCount: 2 }];
+      mocked.interactionManagerGetSnapshotMock.mockReturnValue(
+        activeMenuSnapshot({
+          providers,
+          providersPage: 0,
+          providerIndex: 0,
+          providerModelsPage: 0,
+          models: [
+            { providerID: "openai", modelID: "gpt-4o", variant: "default" },
+            { providerID: "openai", modelID: "retired", variant: "default" },
+          ],
+        }),
+      );
+      mocked.getModelAvailabilityMock.mockResolvedValue("model-missing");
+      mocked.getProviderModelsMock.mockResolvedValue([{ providerID: "openai", modelID: "gpt-4o" }]);
+
+      const ctx = providerMenuContext("model:pick:1");
+      const result = await handleModelProvidersCallback(ctx, createDeps());
+
+      expect(result).toBe(true);
+      expect(mocked.getModelAvailabilityMock).toHaveBeenCalledWith("openai", "retired");
+      expect(mocked.selectModelMock).not.toHaveBeenCalled();
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith();
+      expect(ctx.editMessageText).toHaveBeenCalledWith(
+        "OpenAI — select model:",
+        expect.objectContaining({ reply_markup: expect.anything() }),
+      );
+      expect(mocked.interactionManagerTransitionMock).toHaveBeenCalledWith({
+        expectedInput: "callback",
+        metadata: expect.objectContaining({
+          providerIndex: 0,
+          models: [{ providerID: "openai", modelID: "gpt-4o", variant: "default" }],
+        }),
+      });
     });
 
     it("rejects a callback whose model cannot be resolved from the menu snapshot", async () => {

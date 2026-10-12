@@ -4,7 +4,7 @@ import { isTtsConfigured } from "../../app/services/tts-service.js";
 import {
   getCompactOutputMode,
   getDeleteCompactProgressOnFinish,
-  getPromptQueueEnabled,
+  getPromptQueueMode,
   getResponseStreamingMode,
   getSendDiffFileAttachments,
   getPinnedDashboardEnabled,
@@ -14,17 +14,20 @@ import {
   setCompactOutputMode,
   setDeleteCompactProgressOnFinish,
   setPinnedDashboardEnabled,
-  setPromptQueueEnabled,
+  setPromptQueueMode,
   setResponseStreamingMode,
   setSendDiffFileAttachments,
   setShowAssistantRunFooter,
   setShowThinkingContent,
   setTtsMode,
+  type PromptQueueMode,
   type ResponseStreamingMode,
   type TtsMode,
 } from "../../app/stores/settings-store.js";
 import { t } from "../../i18n/index.js";
+import { opencodeServerVersion } from "../../opencode/client.js";
 import { logger } from "../../utils/logger.js";
+import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { appendInlineMenuCancelButton, ensureActiveInlineMenu } from "../menus/inline-menu.js";
 import {
   buildSettingsMenuView,
@@ -59,6 +62,19 @@ function getNextTtsMode(mode: TtsMode): TtsMode {
 
   if (mode === "all") {
     return "auto";
+  }
+
+  return "off";
+}
+
+/** V2 cycles Off → Queue → Steer; V1 toggles its own queue on and off. */
+function getNextPromptQueueMode(mode: PromptQueueMode): PromptQueueMode {
+  if (mode === "off") {
+    return "queue";
+  }
+
+  if (mode === "queue" && opencodeServerVersion === "v2") {
+    return "steer";
   }
 
   return "off";
@@ -137,7 +153,7 @@ export async function handleSettingsCallback(
     }
 
     if (callbackData === SETTINGS_PROMPT_QUEUE_CALLBACK) {
-      setPromptQueueEnabled(!getPromptQueueEnabled());
+      setPromptQueueMode(getNextPromptQueueMode(getPromptQueueMode()));
       const { text, keyboard } = buildSettingsMenuView();
       await ctx.answerCallbackQuery({ text: t("settings.saved") });
       await ctx.editMessageText(text, {
@@ -164,6 +180,13 @@ export async function handleSettingsCallback(
       }
       await deps.pinnedMessageManager.applyPinnedDashboardEnabled(nextEnabled);
       setPinnedDashboardEnabled(nextEnabled);
+      if (nextEnabled) {
+        // Sent at once from what the bot holds; corrected once the session's values load.
+        safeBackgroundTask({
+          taskName: "settings.refreshPinnedDashboard",
+          task: () => deps.pinnedMessageManager.refreshSessionValues(),
+        });
+      }
       const { text, keyboard } = buildSettingsMenuView();
       await ctx.answerCallbackQuery({ text: t("settings.saved") });
       await ctx.editMessageText(text, {
