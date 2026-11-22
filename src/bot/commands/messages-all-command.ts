@@ -12,6 +12,21 @@ export type MessagesAllCommandDeps = Pick<
   "interactionManager"
 >;
 
+interface SessionMessagePartLike {
+  type?: string;
+  text?: string;
+}
+
+interface SessionMessageLike {
+  info?: {
+    role?: string;
+    time?: {
+      created?: number;
+    };
+  };
+  parts?: SessionMessagePartLike[];
+}
+
 export async function messagesAllCommand(
   ctx: CommandContext<Context>,
   _deps?: MessagesAllCommandDeps,
@@ -48,14 +63,14 @@ export async function messagesAllCommand(
     ];
 
     let count = 0;
-    for (const msg of data as any[]) {
+    for (const msg of data as SessionMessageLike[]) {
       const role = (msg.info?.role || "unknown").toUpperCase();
       const timeStr = msg.info?.time?.created
         ? new Date(msg.info.time.created).toLocaleTimeString()
         : "";
       const textParts = (msg.parts || [])
-        .filter((p: any) => typeof p.text === "string" && p.text.trim())
-        .map((p: any) => p.text.trim())
+        .filter((p): p is SessionMessagePartLike & { text: string } => typeof p.text === "string" && Boolean(p.text.trim()))
+        .map((p) => p.text.trim())
         .join("\n\n");
 
       if (textParts) {
