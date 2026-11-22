@@ -24,6 +24,7 @@ Thumbs.db
 .codex/
 .kilocode/
 .opencode/
+.stepan/
 opencode.json
 .pi/
 .omp/
@@ -31,6 +32,7 @@ opencode.json
 # Project specific
 logs/
 run/
+inbox/
 settings.json
 settings.json.bak
 settings.json.tmp

@@ -29,13 +29,14 @@ import { registerToolActivityHandlers } from "../events/handlers/tool-activity-h
 import { registerInteractionHandlers } from "../events/handlers/interaction-handler.js";
 import { registerSessionLifecycleHandlers } from "../events/handlers/session-lifecycle-handler.js";
 import { registerDashboardHandlers } from "../events/handlers/dashboard-handler.js";
+import { registerGoalHandlers } from "../events/handlers/goal-handler.js";
 
 export interface BotEventSubscriptionService {
   ensureEventSubscription(directory: string): Promise<void>;
   setTelegramContext(bot: Bot<Context> | null, chatId: number | null): void;
   clearRuntimeState(reason: string): void;
   stopBackgroundOperations(reason: string, sessionId?: string): void;
-  stopBackgroundCommands(reason: string, sessionId?: string): void;
+  countBackgroundOperations(sessionId: string): number;
   interruptSubagents(reason: string): void;
   endRunLostWithServer(reason: string): Promise<void>;
   cleanup(reason: string): void;
@@ -48,6 +49,7 @@ export type EventSubscriptionServiceDeps = Pick<
   | "backgroundSessionTracker"
   | "externalUserInputSuppressionManager"
   | "foregroundSessionState"
+  | "goalService"
   | "interactionManager"
   | "keyboardManager"
   | "permissionManager"
@@ -121,6 +123,10 @@ class EventSubscriptionService implements BotEventSubscriptionService {
     this.runtime.stopBackgroundCommands(reason, sessionId);
   };
 
+  countBackgroundOperations = (sessionId: string): number =>
+    this.runtime.countBackgroundCommands(sessionId) +
+    this.deps.summaryAggregator.countFollowedBackgroundSubagents();
+
   interruptSubagents = (reason: string): void => {
     logger.debug(`[Bot] Interrupting running subagent cards: reason=${reason}`);
     this.deps.summaryAggregator.interruptSubagents();
@@ -161,6 +167,7 @@ class EventSubscriptionService implements BotEventSubscriptionService {
     registerInteractionHandlers(handlerDeps);
     registerSessionLifecycleHandlers(handlerDeps);
     registerDashboardHandlers(handlerDeps);
+    registerGoalHandlers(handlerDeps);
 
     logger.info(`[Bot] Subscribing to OpenCode events for project: ${directory}`);
     subscribeToEvents(
@@ -202,29 +209,40 @@ class EventSubscriptionService implements BotEventSubscriptionService {
     const { summaryAggregator } = deps;
     summaryAggregator.forgetLiveTurn();
 
-    summaryAggregator.holdOutbound();
-    // Every subagent card still running ends with the server and is no longer followed; one
-    // the server resumes gets a new card.
-    summaryAggregator.interruptSubagents(true);
+    const holdGeneration = summaryAggregator.holdOutbound();
+    try {
+      // Every subagent card still running ends with the server and is no longer followed; one
+      // the server resumes gets a new card.
+      summaryAggregator.interruptSubagents(true);
 
-    const sessionId = getCurrentSession()?.id;
-    const runningTools = sessionId ? runtime.getRunningToolInfos(sessionId) : [];
-    if (sessionId && (deps.assistantRunState.hasRun(sessionId) || runningTools.length > 0)) {
-      logger.info(
-        `[Bot] Ending the run lost with the OpenCode server: session=${sessionId}, runningTools=${runningTools.length}, reason=${reason}`,
-      );
-      deps.assistantRunState.clearRun(sessionId, reason);
+      const sessionId = getCurrentSession()?.id;
+      const runningTools = sessionId ? runtime.getRunningToolInfos(sessionId) : [];
+      if (sessionId && (deps.assistantRunState.hasRun(sessionId) || runningTools.length > 0)) {
+        logger.info(
+          `[Bot] Ending the run lost with the OpenCode server: session=${sessionId}, runningTools=${runningTools.length}, reason=${reason}`,
+        );
+        deps.assistantRunState.clearRun(sessionId, reason);
 
-      const now = Date.now();
-      for (const tool of runningTools) {
-        summaryAggregator.processEvent(buildFailedToolEvent(tool, now));
+        const now = Date.now();
+        for (const tool of runningTools) {
+          summaryAggregator.processEvent(buildFailedToolEvent(tool, now));
+        }
+        for (const event of buildInterruptedIdleEvents(sessionId)) {
+          summaryAggregator.processEvent(event);
+        }
       }
-      for (const event of buildInterruptedIdleEvents(sessionId)) {
-        summaryAggregator.processEvent(event);
-      }
+
+      await Promise.all([
+        pollClosed,
+        summaryAggregator.drainOutbound(0, holdGeneration),
+        summaryAggregator.whenOutboundIdle(),
+      ]);
+    } finally {
+      // Best-effort release: a throw before the drain must not leave the hold set.
+      void summaryAggregator.drainOutbound(0, holdGeneration).catch((error) => {
+        logger.warn("[Bot] Failed to release the ending outbound:", error);
+      });
     }
-
-    await Promise.all([pollClosed, summaryAggregator.drainOutbound(0)]);
   };
 
   private restoreAfterReconnect({ serverRestarted }: ReconnectInfo): void {
@@ -249,6 +267,8 @@ class EventSubscriptionService implements BotEventSubscriptionService {
       reconcileInboxPrompts(session.id).catch((error) => {
         logger.warn("[Bot] Failed to reconcile the session inbox after reconnect:", error);
       });
+      this.deps.goalService.forgetCapability();
+      void this.deps.goalService.refresh(session.id, session.directory, false);
     }
 
     const bot = this.botInstance;

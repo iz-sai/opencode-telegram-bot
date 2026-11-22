@@ -10,8 +10,10 @@ import { chunkPlainText } from "../render/chunker.js";
 import { TELEGRAM_TEXT_MESSAGE_LIMIT } from "../render/limits.js";
 import { getTelegramRenderedPartSignature } from "../render/part-signature.js";
 import type { TelegramRenderedPart } from "../render/types.js";
+import { deliverAssistantImagePart, hasDeferredImages } from "./assistant-image-delivery.js";
 
-type SendMessageApi = Pick<Api<RawApi>, "sendMessage" | "sendRichMessage">;
+type SendMessageApi = Pick<Api<RawApi>, "sendMessage" | "sendRichMessage"> &
+  Partial<Pick<Api<RawApi>, "editMessageText">>;
 type EditMessageApi = Pick<Api<RawApi>, "editMessageText">;
 type SendDraftApi = Pick<Api<RawApi>, "sendMessageDraft" | "sendRichMessageDraft">;
 
@@ -20,6 +22,11 @@ type TelegramEditMessageOptions = Parameters<EditMessageApi["editMessageText"]>[
 type TelegramSendRichOptions = Parameters<SendMessageApi["sendRichMessage"]>[2];
 
 export type TelegramTextFormat = "raw" | "markdown_v2";
+
+/** The agent's text keeps Telegram's link preview; bot text defaults to none. */
+export const AGENT_TEXT_LINK_PREVIEW_OPTIONS = {
+  link_preview_options: { is_disabled: false },
+} as const;
 
 interface SendBotTextParams {
   api: Pick<Api<RawApi>, "sendMessage">;
@@ -93,6 +100,21 @@ function stripRichFormattingOptions<T extends TelegramSendMessageOptions | undef
   return rawOptions as T;
 }
 
+/** Rich messages have no link preview setting; they go out as Telegram draws them. */
+function stripLinkPreviewOptions<T extends TelegramSendMessageOptions | undefined>(options: T): T {
+  if (!options) {
+    return options;
+  }
+
+  const richOptions = {
+    ...options,
+  } as NonNullable<T> & { link_preview_options?: unknown };
+
+  delete richOptions.link_preview_options;
+
+  return richOptions as T;
+}
+
 function isPlainPart(part: TelegramRenderedPart): boolean {
   return part.source === "plain" || part.blocks.length === 0;
 }
@@ -163,11 +185,31 @@ export async function sendRenderedBotPart({
     };
   }
 
+  if (hasDeferredImages(part)) {
+    const editMessageText = api.editMessageText?.bind(api);
+    const sentMessage = await deliverAssistantImagePart(
+      part,
+      (blocks) =>
+        api.sendRichMessage(
+          chatId,
+          { blocks },
+          stripLinkPreviewOptions(rawOptions) as TelegramSendRichOptions,
+        ),
+      editMessageText
+        ? (sent, blocks) => editMessageText(chatId, sent.message_id, { blocks })
+        : undefined,
+    );
+    return {
+      messageId: sentMessage.message_id,
+      deliveredSignature: getTelegramRenderedPartSignature(part),
+    };
+  }
+
   try {
     const sentMessage = await api.sendRichMessage(
       chatId,
       { blocks: part.blocks },
-      rawOptions as TelegramSendRichOptions,
+      stripLinkPreviewOptions(rawOptions) as TelegramSendRichOptions,
     );
 
     return {
@@ -234,8 +276,24 @@ export async function editRenderedBotPart({
     };
   }
 
+  if (hasDeferredImages(part)) {
+    await deliverAssistantImagePart(
+      part,
+      (blocks) =>
+        api.editMessageText(chatId, messageId, { blocks }, stripLinkPreviewOptions(rawOptions)),
+      (_sent, blocks) =>
+        api.editMessageText(chatId, messageId, { blocks }, stripLinkPreviewOptions(rawOptions)),
+    );
+    return { deliveredSignature: getTelegramRenderedPartSignature(part) };
+  }
+
   try {
-    await api.editMessageText(chatId, messageId, { blocks: part.blocks }, rawOptions);
+    await api.editMessageText(
+      chatId,
+      messageId,
+      { blocks: part.blocks },
+      stripLinkPreviewOptions(rawOptions),
+    );
 
     return {
       deliveredSignature: getTelegramRenderedPartSignature(part),
@@ -309,6 +367,9 @@ export async function completeDraftPart({
   part,
   options,
 }: CompleteDraftPartParams): Promise<RenderedPartSendResult> {
+  if (hasDeferredImages(part)) {
+    return sendRenderedBotPart({ api, chatId, part, options, allowPlainFallback: false });
+  }
   const rawOptions = stripRichFormattingOptions(options);
 
   logger.debug("[Bot] Completing draft with real message", {
@@ -327,7 +388,7 @@ export async function completeDraftPart({
   const sentMessage = await api.sendRichMessage(
     chatId,
     { blocks: part.blocks },
-    rawOptions as TelegramSendRichOptions,
+    stripLinkPreviewOptions(rawOptions) as TelegramSendRichOptions,
   );
   return {
     messageId: sentMessage.message_id,

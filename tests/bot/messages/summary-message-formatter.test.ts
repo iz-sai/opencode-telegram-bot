@@ -1,13 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatSummary,
   formatSummaryWithMode,
 } from "../../../src/bot/messages/summary-message-formatter.js";
 import {
+  formatCollapsedTodoSnapshot,
   formatCompactToolActivity,
+  formatRunningTaskLine,
   formatToolInfo,
+  getTodoSnapshot,
   prepareCodeFile,
 } from "../../../src/app/formatters/summary-formatter.js";
+import { resetRuntimeLocale, setRuntimeLocale } from "../../../src/i18n/index.js";
 import { defined } from "../../helpers/defined.js";
 
 const mocked = vi.hoisted(() => ({
@@ -154,6 +158,156 @@ describe("bot/messages/summary-message-formatter", () => {
     expect(text).toBe("📝 todowrite (3)\n\n✅ Done item\n🔄 In progress item\n🔲 Pending item");
   });
 
+  it("shows a running todowrite call's list from its arguments", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m1b",
+      callId: "c1b",
+      tool: "todowrite",
+      state: { status: "running" } as never,
+      input: {
+        todos: [
+          { id: "1", content: "Done item", status: "completed" },
+          { id: "2", content: "Malformed item" },
+          { id: "3", content: "Pending item", status: "pending" },
+        ],
+      },
+    });
+
+    expect(text).toBe("📝 todowrite (2)\n\n✅ Done item\n🔲 Pending item");
+  });
+
+  it("keeps a running todowrite call on the list it is running on", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m1d",
+      callId: "c1d",
+      tool: "todowrite",
+      state: { status: "running" } as never,
+      input: { todos: [{ id: "1", content: "Running on this", status: "in_progress" }] },
+      metadata: { todos: [{ id: "1", content: "Something else", status: "pending" }] },
+    });
+
+    expect(text).toBe("📝 todowrite (1)\n\n🔄 Running on this");
+  });
+
+  it("prefers a finished todowrite call's result over its arguments", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m1c",
+      callId: "c1c",
+      tool: "todowrite",
+      state: { status: "completed" } as never,
+      input: { todos: [{ id: "1", content: "Asked for", status: "pending" }] },
+      metadata: { todos: [{ id: "1", content: "Stored", status: "completed" }] },
+    });
+
+    expect(text).toBe("📝 todowrite (1)\n\n✅ Stored");
+  });
+
+  it("keeps a finished todowrite call off its arguments when no result list came", () => {
+    const finished = ["completed", "error"] as const;
+
+    for (const status of finished) {
+      const text = formatToolInfo({
+        sessionId: "s1",
+        messageId: `m1-${status}`,
+        callId: `c1-${status}`,
+        tool: "todowrite",
+        state: { status } as never,
+        input: { todos: [{ id: "1", content: "Asked for", status: "pending" }] },
+        metadata: {},
+      });
+
+      expect(text).toBe("📝 todowrite");
+    }
+  });
+
+  it("shows a known empty todo list as a count without items", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m1e",
+      callId: "c1e",
+      tool: "todowrite",
+      state: { status: "running" } as never,
+      input: { todos: [] },
+    });
+
+    expect(text).toBe("📝 todowrite (0)");
+  });
+
+  it("shortens a running todowrite list to one compact line", () => {
+    const activity = formatCompactToolActivity({
+      sessionId: "s1",
+      messageId: "m1f",
+      callId: "c1f",
+      tool: "todowrite",
+      state: { status: "running" } as never,
+      input: {
+        todos: [
+          { id: "1", content: "Read the README", status: "completed" },
+          { id: "2", content: "Write a summary", status: "pending" },
+        ],
+      },
+    });
+
+    expect(activity).toBe("📝 todowrite (2) ✅ Read the README 🔲 Write a summary");
+  });
+
+  it("reads a todo call as a snapshot with the counts its collapsed form needs", () => {
+    const snapshot = getTodoSnapshot({
+      sessionId: "s1",
+      messageId: "m1g",
+      callId: "c1g",
+      tool: "todowrite",
+      state: { status: "running" } as never,
+      input: {
+        todos: [
+          { id: "1", content: "Read the README", status: "completed" },
+          { id: "2", content: "Write a summary", status: "in_progress" },
+          { id: "3", content: "Ship it", status: "pending" },
+        ],
+      },
+    });
+
+    expect(snapshot).toEqual({
+      text: "📝 todowrite (3)\n\n✅ Read the README\n🔄 Write a summary\n🔲 Ship it",
+      done: 1,
+      total: 3,
+    });
+  });
+
+  it("reads a known empty todo list as a zero snapshot", () => {
+    const snapshot = getTodoSnapshot({
+      sessionId: "s1",
+      messageId: "m1h",
+      callId: "c1h",
+      tool: "todowrite",
+      state: { status: "running" } as never,
+      input: { todos: [] },
+    });
+
+    expect(snapshot).toEqual({ text: "📝 todowrite (0)", done: 0, total: 0 });
+  });
+
+  it("has no snapshot for a todo call whose list is not known", () => {
+    const snapshot = getTodoSnapshot({
+      sessionId: "s1",
+      messageId: "m1i",
+      callId: "c1i",
+      tool: "todowrite",
+      state: { status: "running" } as never,
+      input: {},
+    });
+
+    expect(snapshot).toBeNull();
+  });
+
+  it("formats a collapsed snapshot as counts only", () => {
+    expect(formatCollapsedTodoSnapshot(2, 5)).toBe("📝 todowrite (2/5)");
+    expect(formatCollapsedTodoSnapshot(0, 0)).toBe("📝 todowrite (0/0)");
+  });
+
   it("formats write/edit tool details with line counters", () => {
     const writeText = formatToolInfo({
       sessionId: "s1",
@@ -270,6 +424,75 @@ describe("bot/messages/summary-message-formatter", () => {
     expect(text).toMatch(/^💻 bash /);
     expect(text?.endsWith("...")).toBe(true);
     expect(text).toHaveLength("💻 bash ".length + 128);
+  });
+
+  it("truncates long execute code like a bash command, over its title", () => {
+    const longCode = `const files = await tools.glob({ pattern: "**/*.ts" });\n${"a".repeat(160)}`;
+
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m4e",
+      callId: "c4e",
+      tool: "execute",
+      state: { status: "completed" } as never,
+      title: "Run code",
+      input: {
+        code: longCode,
+      },
+    });
+
+    expect(text).toBe(`🛠️ execute ${longCode.slice(0, 125)}...`);
+  });
+
+  it("shows short execute code whole with its newlines", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m4f",
+      callId: "c4f",
+      tool: "execute",
+      state: { status: "running" } as never,
+      input: {
+        code: "const a = 1;\nreturn a;",
+      },
+    });
+
+    expect(text).toBe("🛠️ execute const a = 1;\nreturn a;");
+  });
+
+  it("keeps execute uncut when its code is not text", () => {
+    const text = formatToolInfo({
+      sessionId: "s1",
+      messageId: "m4g",
+      callId: "c4g",
+      tool: "execute",
+      state: { status: "running" } as never,
+      title: "Run code",
+      input: {
+        code: 42,
+      },
+    });
+
+    expect(text).toBe("🛠️ execute Run code");
+  });
+
+  it("cuts a compact execute line at the compact limit", () => {
+    const text = formatCompactToolActivity(
+      {
+        sessionId: "s1",
+        messageId: "m4h",
+        callId: "c4h",
+        tool: "execute",
+        state: { status: "running" } as never,
+        input: {
+          code: `return 1;\n${"b".repeat(200)}`,
+        },
+      },
+      128,
+    );
+
+    expect(text).toBe(
+      `🛠️ execute return 1; ${"b".repeat(128 - "🛠️ execute return 1; ".length - 3)}...`,
+    );
   });
 
   it("formats apply_patch tool details without dumping full patch", () => {
@@ -523,6 +746,56 @@ describe("bot/messages/summary-message-formatter", () => {
         },
       });
       expect(formatCompactToolActivity(finished, 128)).toBe("🩹 apply_patch src/a.ts (+1)");
+    });
+  });
+
+  describe("running task line", () => {
+    beforeEach(() => {
+      setRuntimeLocale("en");
+    });
+
+    afterEach(() => {
+      resetRuntimeLocale();
+    });
+
+    it("names the task from its description, never from its prompt", () => {
+      const line = formatRunningTaskLine({
+        description: "Count Kotlin files",
+        prompt: "Count the number of Kotlin files under src/main",
+      });
+
+      expect(line).toBe("🤖 Running Task: Count Kotlin files");
+    });
+
+    it.each([
+      ["no input", undefined],
+      ["a prompt only", { prompt: "Count the files" }],
+      ["a blank description", { description: " \n\t " }],
+      ["a description that is not text", { description: 42 }],
+    ])("shows the bare line for %s", (_case, input) => {
+      expect(formatRunningTaskLine(input)).toBe("🤖 Running Task");
+    });
+
+    it("shows a multi-line description on one line", () => {
+      expect(formatRunningTaskLine({ description: "  Count\n  Kotlin   files\n" })).toBe(
+        "🤖 Running Task: Count Kotlin files",
+      );
+    });
+
+    it("cuts the whole line at the activity-line length with an ellipsis", () => {
+      const line = formatRunningTaskLine({ description: "word ".repeat(60) });
+
+      expect(line.length).toBeLessThanOrEqual(128);
+      expect(line.startsWith("🤖 Running Task: word word")).toBe(true);
+      expect(line.endsWith("…")).toBe(true);
+    });
+
+    it("keeps the locale's own label", () => {
+      setRuntimeLocale("ru");
+
+      expect(formatRunningTaskLine({ description: "Count Kotlin files" })).toBe(
+        "🤖 Выполняю задачу: Count Kotlin files",
+      );
     });
   });
 });

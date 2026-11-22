@@ -73,6 +73,22 @@ export interface V2ClientExtension {
      * is loaded for the folder, so listing one that is gone registers nothing on the server.
      */
     list: (params: { path: string }) => Promise<Result<string[]>>;
+    entries: (params: {
+      path: string;
+    }) => Promise<Result<Array<{ path: string; type: "file" | "directory" }>>>;
+  };
+  goal: {
+    /** `opencode.goal` get. `data` is the goal object, or null when the session has none. */
+    get: (params: { sessionID: string; directory?: string }) => Promise<Result<unknown>>;
+    /** Runs the server command named goal. A missing plugin is `GoalUnsupportedError`. */
+    command: (params: {
+      sessionID: string;
+      directory?: string;
+      text: string;
+      agent?: string;
+      model?: { providerID: string; modelID: string };
+      variant?: string;
+    }) => Promise<Result<true>>;
   };
 }
 
@@ -88,6 +104,7 @@ interface CommandParams {
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const MESSAGE_PAGE_SIZE = 200;
 const MAX_MESSAGE_PAGES = 50;
+const SESSION_PAGE_SIZE = 100;
 const COMPLETION_POLL_INTERVAL_MS = 250;
 const COMPLETION_POLL_ATTEMPTS = 40;
 const SERVER_IDENTITY_TIMEOUT_MS = 2_000;
@@ -112,6 +129,41 @@ function toV1Error(error: unknown): unknown {
     return { name: "NotFoundError", data: { message: error.message } };
   }
   return error;
+}
+
+function asGoalError(error: unknown, source: "rpc" | "command"): unknown {
+  if (isUnsupportedGoalError(error, source)) {
+    const message = error instanceof Error ? error.message : "";
+    return { name: "GoalUnsupportedError", message };
+  }
+  return toV1Error(error);
+}
+
+function isUnsupportedGoalError(error: unknown, source: "rpc" | "command"): boolean {
+  const name = error instanceof Error ? error.name : "";
+  const tag =
+    typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string"
+      ? error._tag
+      : "";
+  const type =
+    typeof error === "object" && error !== null && "type" in error && typeof error.type === "string"
+      ? error.type
+      : "";
+  if (
+    name === "CommandNotFoundError" ||
+    tag === "CommandNotFoundError" ||
+    name.endsWith("CommandNotFoundError")
+  ) {
+    return true;
+  }
+  if (type === "rpc.method_not_found" || type === "rpc.unavailable") {
+    return true;
+  }
+  if (source !== "rpc" || !(error instanceof Error) || error.name !== "ClientError") {
+    return false;
+  }
+  const details = error as Error & { reason?: unknown; cause?: { status?: unknown } };
+  return details.reason === "UnexpectedStatus" && details.cause?.status === 404;
 }
 
 async function run<T>(operation: () => Promise<T>): Promise<Result<T>> {
@@ -146,10 +198,9 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * `V2ClientExtension`; everything else is absent.
  */
 export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient {
-  const client: OpenCodeClient = OpenCode.make({
-    baseUrl: options.baseUrl,
-    ...(options.headers ? { headers: options.headers } : {}),
-  });
+  // Handed over as is: the SDK reads the address and headers on every request and stream
+  // connect, so an options object with getters follows a server switch.
+  const client: OpenCodeClient = OpenCode.make(options);
 
   // Replies to V2 forms and permissions need the session and, for forms, the fields;
   // both are learned from the lists and the event stream.
@@ -237,7 +288,11 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
   async function listMessages(sessionID: string, limit?: number) {
     if (limit !== undefined) {
       // Other entry kinds (idle markers, model switches) share the page, so over-fetch.
-      const page = await client.message.list({ sessionID, limit: limit * 3, order: "desc" });
+      const page = await client.message.list({
+        sessionID,
+        limit: Math.min(limit * 3, MESSAGE_PAGE_SIZE),
+        order: "desc",
+      });
       return [...page.data].reverse();
     }
     const all = [];
@@ -433,9 +488,24 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
         }),
     },
     file: {
+      read: (params: { path: string; directory?: string }) =>
+        run(async () => ({
+          type: "binary" as const,
+          encoding: "base64" as const,
+          content: Buffer.from(
+            await client.file.read({ path: params.path, ...location(params.directory) }),
+          ).toString("base64"),
+        })),
       list: (params: { path: string }) =>
         run(async () =>
           (await client.file.list({ path: params.path })).data.map((entry) => entry.path),
+        ),
+      entries: (params: { path: string }) =>
+        run(async () =>
+          (await client.file.list({ path: params.path })).data.map((entry) => ({
+            path: entry.path,
+            type: entry.type,
+          })),
         ),
     },
     experimental: {
@@ -454,13 +524,42 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
     session: {
       list: (params: { directory?: string; limit?: number; roots?: boolean }) =>
         run(async () => {
-          const result = await client.session.list({
-            order: "desc",
-            ...(params.directory ? { directory: params.directory } : {}),
-            ...(params.limit ? { limit: params.limit } : {}),
-            ...(params.roots ? { parentID: null } : {}),
-          });
-          return result.data.map(toV1Session);
+          if (params.limit) {
+            const result = await client.session.list({
+              order: "desc",
+              ...(params.directory ? { directory: params.directory } : {}),
+              ...(params.limit ? { limit: params.limit } : {}),
+              ...(params.roots ? { parentID: null } : {}),
+            });
+            return result.data.map(toV1Session);
+          }
+
+          // No limit means the caller wants the whole list, not just its first page.
+          // A cursor carries its own order; the server refuses both together.
+          const all = [];
+          const seen = new Set<string>();
+          let cursor: string | undefined;
+          for (;;) {
+            const result = await client.session.list({
+              limit: SESSION_PAGE_SIZE,
+              ...(cursor
+                ? { cursor }
+                : {
+                    order: "desc",
+                    ...(params.directory ? { directory: params.directory } : {}),
+                    ...(params.roots ? { parentID: null } : {}),
+                  }),
+            });
+            all.push(...result.data);
+            const next = result.cursor?.next;
+            // A cursor already followed would repeat a page forever, directly or in a cycle.
+            if (!next || seen.has(next) || result.data.length === 0) {
+              break;
+            }
+            seen.add(next);
+            cursor = next;
+          }
+          return all.map(toV1Session);
         }),
       get: (params: { sessionID: string }) =>
         run(async () => toV1Session(await client.session.get({ sessionID: params.sessionID }))),
@@ -648,6 +747,52 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
           return true;
         }),
     },
+    goal: {
+      get: async (params: { sessionID: string; directory?: string }) => {
+        try {
+          const result = await client.rpc.call({
+            rpcID: "opencode.goal",
+            method: "get",
+            input: { sessionID: params.sessionID },
+            ...(params.directory ? { location: { directory: params.directory } } : {}),
+          });
+          return { data: result.output ?? null, error: undefined };
+        } catch (error) {
+          return { data: undefined, error: asGoalError(error, "rpc") };
+        }
+      },
+      command: async (params: {
+        sessionID: string;
+        text: string;
+        agent?: string;
+        model?: { providerID: string; modelID: string };
+        variant?: string;
+      }) => {
+        try {
+          await applySelection(
+            params.sessionID,
+            params.agent,
+            params.model
+              ? { providerID: params.model.providerID, id: params.model.modelID }
+              : undefined,
+            params.variant,
+          );
+        } catch (error) {
+          return { data: undefined, error: { name: "GoalSelectionError", cause: error } };
+        }
+        try {
+          await client.session.command({
+            sessionID: params.sessionID,
+            name: "goal",
+            text: params.text,
+            delivery: "queue",
+          });
+          return { data: true as const, error: undefined };
+        } catch (error) {
+          return { data: undefined, error: asGoalError(error, "command") };
+        }
+      },
+    },
     permission: {
       list: (params?: { directory?: string }) =>
         run(async () => {
@@ -684,13 +829,26 @@ export function createV2OpencodeClient(options: V2ClientOptions): OpencodeClient
   return adapter as unknown as OpencodeClient;
 }
 
+export interface RegisteredV2Server {
+  url: string;
+  username?: string;
+  password?: string;
+}
+
 /**
- * URL of the V2 background server registered for this user, or null when no registered
- * server answers. There is one per user: a new registered server replaces it.
+ * The V2 background server registered for this user, with the credentials it expects, or
+ * null when no registered server answers. There is one per user: a new registered server
+ * replaces it.
  */
-export async function findRegisteredV2ServerUrl(): Promise<string | null> {
+export async function findRegisteredV2Server(): Promise<RegisteredV2Server | null> {
   try {
-    return (await Service.discover())?.url ?? null;
+    const endpoint = await Service.discover();
+    if (!endpoint) {
+      return null;
+    }
+    return endpoint.auth
+      ? { url: endpoint.url, username: endpoint.auth.username, password: endpoint.auth.password }
+      : { url: endpoint.url };
   } catch {
     return null;
   }

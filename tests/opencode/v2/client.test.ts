@@ -4,10 +4,12 @@ import { isExpectedOpencodeUnavailableError } from "../../../src/utils/opencode-
 
 const fake = vi.hoisted(() => ({
   makeOptions: null as unknown,
+  discover: vi.fn(),
   events: [] as unknown[],
   client: {
     server: { info: vi.fn() },
     session: {
+      list: vi.fn(),
       get: vi.fn(),
       switchAgent: vi.fn(),
       switchModel: vi.fn(),
@@ -15,6 +17,7 @@ const fake = vi.hoisted(() => ({
       command: vi.fn(),
       wait: vi.fn(),
       active: vi.fn(),
+      diff: vi.fn(),
       form: { reply: vi.fn(), cancel: vi.fn(), get: vi.fn() },
       inbox: { list: vi.fn(), cancel: vi.fn() },
     },
@@ -24,7 +27,7 @@ const fake = vi.hoisted(() => ({
     permission: { request: { list: vi.fn() }, reply: vi.fn() },
     event: { subscribe: vi.fn() },
     location: { reload: vi.fn() },
-    file: { list: vi.fn() },
+    file: { list: vi.fn(), read: vi.fn() },
   },
 }));
 
@@ -37,8 +40,13 @@ vi.mock("@opencode/client", () => ({
   },
 }));
 
+vi.mock("@opencode/client/service", () => ({
+  Service: { discover: fake.discover },
+}));
+
 import {
   createV2OpencodeClient,
+  findRegisteredV2Server,
   type V2ClientExtension,
 } from "../../../src/opencode/v2/client.js";
 
@@ -77,6 +85,26 @@ function resetFakeClient(): void {
 }
 
 describe("opencode/v2/client", () => {
+  it("preserves typed entries for documents without changing existing path-only listings", async () => {
+    const entries = [
+      { path: "/p/a.txt", type: "file" },
+      { path: "/p/src", type: "directory" },
+    ];
+    fake.client.file.list.mockResolvedValue({ data: entries });
+    const client = createClient() as unknown as V2ClientExtension;
+    expect((await client.file.entries({ path: "/p" })).data).toEqual(entries);
+    expect((await client.file.list({ path: "/p" })).data).toEqual(["/p/a.txt", "/p/src"]);
+    expect(fake.client.file.list).toHaveBeenCalledWith({ path: "/p" });
+  });
+  it("adapts remote V2 image bytes to the V1 binary file contract", async () => {
+    fake.client.file.read.mockResolvedValueOnce(new Uint8Array([0, 1, 255]));
+    const result = await createClient().file.read({ directory: "/remote/project", path: "a.png" });
+    expect(result.data).toEqual({ type: "binary", encoding: "base64", content: "AAH/" });
+    expect(fake.client.file.read).toHaveBeenCalledWith({
+      path: "a.png",
+      location: { directory: "/remote/project" },
+    });
+  });
   beforeEach(() => {
     resetFakeClient();
   });
@@ -87,6 +115,50 @@ describe("opencode/v2/client", () => {
     expect(fake.makeOptions).toEqual({
       baseUrl: "http://127.0.0.1:49374",
       headers: { Authorization: "Basic abc" },
+    });
+  });
+
+  it("hands its options to the SDK as is, so getters on them are read per request", () => {
+    let baseUrl = "http://127.0.0.1:49374";
+    const options = {
+      get baseUrl() {
+        return baseUrl;
+      },
+    };
+    createV2OpencodeClient(options);
+
+    baseUrl = "http://127.0.0.1:28894";
+
+    expect(fake.makeOptions).toBe(options);
+    expect((fake.makeOptions as { baseUrl: string }).baseUrl).toBe("http://127.0.0.1:28894");
+  });
+
+  describe("findRegisteredV2Server", () => {
+    it("returns the registered server with its registry credentials", async () => {
+      fake.discover.mockResolvedValue({
+        url: "http://127.0.0.1:28894",
+        auth: { type: "basic", username: "opencode", password: "secret" },
+      });
+
+      await expect(findRegisteredV2Server()).resolves.toEqual({
+        url: "http://127.0.0.1:28894",
+        username: "opencode",
+        password: "secret",
+      });
+    });
+
+    it("returns a registered server without authentication with no credentials", async () => {
+      fake.discover.mockResolvedValue({ url: "http://127.0.0.1:28894" });
+
+      await expect(findRegisteredV2Server()).resolves.toEqual({ url: "http://127.0.0.1:28894" });
+    });
+
+    it("returns null when no registered server answers or the lookup fails", async () => {
+      fake.discover.mockResolvedValueOnce(undefined);
+      await expect(findRegisteredV2Server()).resolves.toBeNull();
+
+      fake.discover.mockRejectedValueOnce(new Error("no registry"));
+      await expect(findRegisteredV2Server()).resolves.toBeNull();
     });
   });
 
@@ -152,6 +224,18 @@ describe("opencode/v2/client", () => {
     expect(isExpectedOpencodeUnavailableError(result.error)).toBe(true);
   });
 
+  it("returns session diff entries under the file name V1 uses", async () => {
+    fake.client.session.diff.mockResolvedValue([
+      { file: "src/a.ts", patch: "@@", additions: 2, deletions: 1, status: "modified" },
+    ]);
+
+    const result = await createClient().session.diff({ sessionID: "ses-1" });
+
+    expect(result.data).toEqual([
+      { file: "src/a.ts", patch: "@@", additions: 2, deletions: 1, status: "modified" },
+    ]);
+  });
+
   it("switches the session model before admitting a prompt with queue delivery", async () => {
     fake.client.session.prompt.mockResolvedValue({ id: "msg-user" });
 
@@ -178,6 +262,99 @@ describe("opencode/v2/client", () => {
       files: [{ uri: "data:image/png;base64,AAA", name: "a.png" }],
       delivery: "queue",
     });
+  });
+
+  it.each(["Fix tests", "resume"])(
+    "commits the selected agent/model/variant before goal %s without changing command input",
+    async (text) => {
+      const client = createClient() as unknown as V2ClientExtension;
+      const result = await client.goal.command({
+        sessionID: "ses-1",
+        text,
+        agent: "plan",
+        model: { providerID: "selected", modelID: "chosen" },
+        variant: "high",
+      });
+      expect(result).toEqual({ data: true, error: undefined });
+      expect(fake.client.session.switchAgent).toHaveBeenCalledExactlyOnceWith({
+        sessionID: "ses-1",
+        agent: "plan",
+      });
+      expect(fake.client.session.switchModel).toHaveBeenCalledExactlyOnceWith({
+        sessionID: "ses-1",
+        model: { providerID: "selected", id: "chosen", variant: "high" },
+      });
+      expect(fake.client.session.command).toHaveBeenCalledExactlyOnceWith({
+        sessionID: "ses-1",
+        name: "goal",
+        text,
+        delivery: "queue",
+      });
+      expect(fake.client.session.switchAgent.mock.invocationCallOrder[0]!).toBeLessThan(
+        fake.client.session.switchModel.mock.invocationCallOrder[0]!,
+      );
+      expect(fake.client.session.switchModel.mock.invocationCallOrder[0]!).toBeLessThan(
+        fake.client.session.command.mock.invocationCallOrder[0]!,
+      );
+      expect(fake.client.session.prompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, "default"])(
+    "uses ordinary selection semantics for goal variant %s",
+    async (variant) => {
+      const client = createClient() as unknown as V2ClientExtension;
+      await client.goal.command({
+        sessionID: "ses-1",
+        text: "Fix tests",
+        model: { providerID: "p2", modelID: "m2" },
+        ...(variant ? { variant } : {}),
+      });
+      expect(fake.client.session.switchModel).toHaveBeenCalledExactlyOnceWith({
+        sessionID: "ses-1",
+        model: { providerID: "p2", id: "m2", ...(variant ? { variant } : {}) },
+      });
+    },
+  );
+
+  it.each(["pause", "clear"])("does not switch selection for goal %s", async (text) => {
+    const client = createClient() as unknown as V2ClientExtension;
+    await client.goal.command({ sessionID: "ses-1", text });
+    expect(fake.client.session.get).not.toHaveBeenCalled();
+    expect(fake.client.session.switchModel).not.toHaveBeenCalled();
+    expect(fake.client.session.switchAgent).not.toHaveBeenCalled();
+    expect(fake.client.session.command).toHaveBeenCalledExactlyOnceWith({
+      sessionID: "ses-1",
+      name: "goal",
+      text,
+      delivery: "queue",
+    });
+  });
+
+  it.each(["switchAgent", "switchModel"] as const)(
+    "does not dispatch goal or call it unsupported after %s fails",
+    async (method) => {
+      const client = createClient() as unknown as V2ClientExtension;
+      const error = Object.assign(new Error("UnexpectedStatus: 500"), { name: "ClientError" });
+      fake.client.session[method].mockRejectedValue(error);
+      const result = await client.goal.command({
+        sessionID: "ses-1",
+        text: "Fix tests",
+        agent: "plan",
+        model: { providerID: "p2", modelID: "m2" },
+      });
+      expect(result.error).toEqual({ name: "GoalSelectionError", cause: error });
+      expect(fake.client.session.command).not.toHaveBeenCalled();
+    },
+  );
+
+  it("still reports an actual absent goal command as unsupported", async () => {
+    fake.client.session.command.mockRejectedValue(
+      Object.assign(new Error("Command not found: goal"), { name: "CommandNotFoundError" }),
+    );
+    const client = createClient() as unknown as V2ClientExtension;
+    const result = await client.goal.command({ sessionID: "ses-1", text: "resume" });
+    expect(result.error).toMatchObject({ name: "GoalUnsupportedError" });
   });
 
   it("sends a prompt with the requested delivery and returns the inbox id it waits under", async () => {
@@ -321,6 +498,97 @@ describe("opencode/v2/client", () => {
     expect(result.data?.parts).toEqual([
       expect.objectContaining({ type: "text", text: '{"kind":"once"}' }),
     ]);
+  });
+
+  it("reads every page of the session list when no limit is asked for", async () => {
+    fake.client.session.list
+      .mockResolvedValueOnce({ data: [SESSION], cursor: { next: "cursor-1" } })
+      .mockResolvedValueOnce({ data: [{ ...SESSION, id: "ses-2" }], cursor: {} });
+
+    const result = await createClient().session.list({ directory: "D:/repo", roots: true });
+
+    expect(fake.client.session.list).toHaveBeenNthCalledWith(1, {
+      limit: 100,
+      order: "desc",
+      directory: "D:/repo",
+      parentID: null,
+    });
+    expect(fake.client.session.list).toHaveBeenNthCalledWith(2, { limit: 100, cursor: "cursor-1" });
+    expect(result.data?.map((session) => session.id)).toEqual(["ses-1", "ses-2"]);
+  });
+
+  it("keeps reading session pages until the server runs out of them", async () => {
+    const pageCount = 60;
+    fake.client.session.list.mockImplementation(async ({ cursor }: { cursor?: string }) => {
+      const page = cursor ? Number(cursor.split("-")[1]) : 0;
+      return {
+        data: [{ ...SESSION, id: `ses-${page}` }],
+        cursor: page + 1 < pageCount ? { next: `page-${page + 1}` } : {},
+      };
+    });
+
+    const result = await createClient().session.list({ directory: "D:/repo", roots: true });
+
+    expect(fake.client.session.list).toHaveBeenCalledTimes(pageCount);
+    expect(result.data).toHaveLength(pageCount);
+  });
+
+  it("stops reading session pages when the server repeats a cursor", async () => {
+    fake.client.session.list.mockResolvedValue({ data: [SESSION], cursor: { next: "cursor-1" } });
+
+    const result = await createClient().session.list({ directory: "D:/repo", roots: true });
+
+    expect(fake.client.session.list).toHaveBeenCalledTimes(2);
+    expect(result.data).toHaveLength(2);
+  });
+
+  it("stops reading session pages when cursors cycle instead of repeating directly", async () => {
+    fake.client.session.list.mockImplementation(async ({ cursor }: { cursor?: string }) => ({
+      data: [SESSION],
+      cursor: { next: cursor === "a" ? "b" : "a" },
+    }));
+
+    await createClient().session.list({ directory: "D:/repo", roots: true });
+
+    expect(fake.client.session.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the session list to one request when a limit is asked for", async () => {
+    fake.client.session.list.mockResolvedValue({ data: [SESSION], cursor: { next: "cursor-1" } });
+
+    const result = await createClient().session.list({
+      directory: "D:/repo",
+      limit: 11,
+      roots: true,
+    });
+
+    expect(fake.client.session.list).toHaveBeenCalledTimes(1);
+    expect(fake.client.session.list).toHaveBeenCalledWith({
+      order: "desc",
+      directory: "D:/repo",
+      limit: 11,
+      parentID: null,
+    });
+    expect(result.data).toHaveLength(1);
+  });
+
+  it("caps the message request at the server's maximum page size", async () => {
+    fake.client.message.list.mockResolvedValue({ data: [], cursor: {} });
+    const client = createClient();
+
+    await client.session.messages({ sessionID: "ses-1", limit: 100 });
+    expect(fake.client.message.list).toHaveBeenLastCalledWith({
+      sessionID: "ses-1",
+      limit: 200,
+      order: "desc",
+    });
+
+    await client.session.messages({ sessionID: "ses-1", limit: 20 });
+    expect(fake.client.message.list).toHaveBeenLastCalledWith({
+      sessionID: "ses-1",
+      limit: 60,
+      order: "desc",
+    });
   });
 
   it("runs a skill through a prompt and other commands through the command endpoint", async () => {

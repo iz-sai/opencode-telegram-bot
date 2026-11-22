@@ -58,10 +58,10 @@ describe("bot/streaming/tool-call-streamer", () => {
     expect(editText).toHaveBeenCalledWith("s1", 10, "first\n\nsecond");
   });
 
-  it("keeps todo updates in a separate message stream", async () => {
+  it("sends a standalone message of its own and edits it by id", async () => {
     vi.useFakeTimers();
 
-    const sendText = vi.fn().mockResolvedValueOnce(10).mockResolvedValueOnce(11);
+    const sendText = vi.fn().mockResolvedValueOnce(10);
     const editText = vi.fn().mockResolvedValue(undefined);
     const deleteText = vi.fn().mockResolvedValue(undefined);
     const streamer = new ToolCallStreamer({
@@ -71,24 +71,110 @@ describe("bot/streaming/tool-call-streamer", () => {
       deleteText,
     });
 
-    streamer.append("s1", "regular tool");
-    await vi.waitFor(() => {
-      expect(sendText).toHaveBeenCalledTimes(1);
+    const messageId = await streamer.sendStandalone("s1", "  snapshot  ");
+
+    expect(messageId).toBe(10);
+    expect(sendText).toHaveBeenCalledWith("s1", "snapshot");
+    await streamer.editStandalone("s1", 10, "snapshot updated");
+    expect(editText).toHaveBeenCalledWith("s1", 10, "snapshot updated");
+  });
+
+  it("lets the tool lines already pending out before a standalone message", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValueOnce(10).mockResolvedValueOnce(11);
+    const streamer = new ToolCallStreamer({
+      throttleMs: 200,
+      sendText,
+      editText: vi.fn().mockResolvedValue(undefined),
+      deleteText: vi.fn().mockResolvedValue(undefined),
     });
 
-    streamer.append("s1", "todo tool", "todo");
-    await vi.waitFor(() => {
-      expect(sendText).toHaveBeenCalledTimes(2);
+    streamer.append("s1", "earlier tool line");
+    const sending = streamer.sendStandalone("s1", "snapshot");
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(200);
+    await sending;
+
+    expect(sendText).toHaveBeenNthCalledWith(1, "s1", "earlier tool line");
+    expect(sendText).toHaveBeenNthCalledWith(2, "s1", "snapshot");
+  });
+
+  it("waits for the reply gate before a standalone message", async () => {
+    vi.useFakeTimers();
+
+    let openGate: () => void = () => {};
+    const sendText = vi.fn().mockResolvedValue(10);
+    const streamer = new ToolCallStreamer({
+      throttleMs: 0,
+      sendText,
+      editText: vi.fn().mockResolvedValue(undefined),
+      deleteText: vi.fn().mockResolvedValue(undefined),
+      takeGate: () => () =>
+        new Promise<void>((resolve) => {
+          openGate = resolve;
+        }),
     });
 
-    streamer.append("s1", "regular tool update");
-    await vi.waitFor(() => {
-      expect(editText).toHaveBeenCalledTimes(1);
+    const sending = streamer.sendStandalone("s1", "snapshot");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sendText).not.toHaveBeenCalled();
+
+    openGate();
+    await sending;
+    expect(sendText).toHaveBeenCalledWith("s1", "snapshot");
+  });
+
+  it("sends no standalone message cancelled while it waited", async () => {
+    vi.useFakeTimers();
+
+    let openGate: () => void = () => {};
+    const sendText = vi.fn().mockResolvedValue(10);
+    const streamer = new ToolCallStreamer({
+      throttleMs: 0,
+      sendText,
+      editText: vi.fn().mockResolvedValue(undefined),
+      deleteText: vi.fn().mockResolvedValue(undefined),
+      takeGate: () => () =>
+        new Promise<void>((resolve) => {
+          openGate = resolve;
+        }),
     });
 
-    expect(sendText).toHaveBeenNthCalledWith(1, "s1", "regular tool");
-    expect(sendText).toHaveBeenNthCalledWith(2, "s1", "todo tool");
-    expect(editText).toHaveBeenCalledWith("s1", 10, "regular tool\n\nregular tool update");
+    let wanted = true;
+    const sending = streamer.sendStandalone("s1", "snapshot", () => wanted);
+    await vi.advanceTimersByTimeAsync(50);
+    wanted = false;
+    openGate();
+
+    await expect(sending).resolves.toBeNull();
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("sends no standalone message cancelled while the queue waited", async () => {
+    vi.useFakeTimers();
+
+    const sendText = vi.fn().mockResolvedValue(10);
+    const streamer = new ToolCallStreamer({
+      throttleMs: 500,
+      sendText,
+      editText: vi.fn().mockResolvedValue(undefined),
+      deleteText: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await streamer.sendStandalone("s1", "first");
+
+    let wanted = true;
+    const second = streamer.sendStandalone("s1", "second", () => wanted);
+    await vi.advanceTimersByTimeAsync(10);
+    wanted = false;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect(second).resolves.toBeNull();
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith("s1", "first");
   });
 
   it("keeps each subagent in an independently editable stream", async () => {
@@ -422,36 +508,6 @@ describe("bot/streaming/tool-call-streamer", () => {
     expect(sendText).toHaveBeenNthCalledWith(2, "s1", "💻 bash next");
   });
 
-  it("freezes every tool stream before waiting on the first stream's pending edit", async () => {
-    vi.useFakeTimers();
-    let resolveEdit: (() => void) | undefined;
-    let id = 1;
-    const sendText = vi.fn(async () => id++);
-    const editText = vi.fn((_sessionId: string, _messageId: number, _text: string) =>
-      new Promise<void>((resolve) => { resolveEdit = resolve; }),
-    );
-    const streamer = new ToolCallStreamer({
-      throttleMs: 0,
-      sendText,
-      editText,
-      deleteText: vi.fn().mockResolvedValue(undefined),
-    });
-
-    streamer.replaceByPrefix("s1", "⏳first", "⏳ first");
-    await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
-    streamer.replaceByPrefix("s1", "⏳todo", "⏳ todo", "todo");
-    await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(2));
-    streamer.replaceByPrefix("s1", "⏳first", "⏳ first updated");
-    await vi.waitFor(() => expect(editText).toHaveBeenCalledTimes(1));
-
-    const breaking = streamer.breakSession("s1", "session_error");
-    streamer.replaceByPrefix("s1", "⏳todo", "todo finished", "todo");
-    resolveEdit?.();
-    await breaking;
-    expect(editText.mock.calls.some((call) => String(call[2]).includes("todo finished"))).toBe(false);
-    expect(sendText).toHaveBeenCalledTimes(2);
-  });
-
   it("ignores removal of a prefix that is not in the stream", async () => {
     vi.useFakeTimers();
 
@@ -554,7 +610,7 @@ describe("bot/streaming/tool-call-streamer", () => {
     });
 
     streamer.append("s1", "regular tool");
-    streamer.append("s1", "todo tool", "todo");
+    streamer.append("s1", "subagent card", "subagent:card");
 
     const flushPromise = streamer.flushSession("s1", "manual_flush");
     await vi.advanceTimersByTimeAsync(200);
@@ -562,7 +618,7 @@ describe("bot/streaming/tool-call-streamer", () => {
 
     expect(sendText).toHaveBeenCalledTimes(2);
     expect(sendText).toHaveBeenNthCalledWith(1, "s1", "regular tool");
-    expect(sendText).toHaveBeenNthCalledWith(2, "s1", "todo tool");
+    expect(sendText).toHaveBeenNthCalledWith(2, "s1", "subagent card");
   });
 
   it("cancels throttled tool sends when clearing all streams", async () => {
@@ -660,6 +716,312 @@ describe("bot/streaming/tool-call-streamer", () => {
     });
 
     expect(sendText).toHaveBeenNthCalledWith(2, "s1", "after break");
+  });
+
+  describe("network recovery", () => {
+    function createStreamer() {
+      vi.useFakeTimers();
+      let id = 1;
+      const sendText = vi.fn(async (_sessionId: string, _text: string) => id++);
+      const editText = vi.fn(async () => undefined);
+      const deleteText = vi.fn(async () => undefined);
+      const streamer = new ToolCallStreamer({
+        throttleMs: 0,
+        sendText,
+        editText,
+        deleteText,
+      });
+      const networkError = {
+        error: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }),
+      };
+      return { streamer, sendText, editText, deleteText, networkError };
+    }
+
+    it.each(["finished", "❌ failed", "💻 interrupted"])(
+      "recovers the latest terminal text after idle: %s",
+      async (terminal) => {
+        const { streamer, sendText, editText, networkError } = createStreamer();
+        streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+        await vi.advanceTimersByTimeAsync(0);
+        editText.mockRejectedValue(networkError);
+        streamer.replaceByPrefix("s1", "⏳one", "⏳ running · 🕒 20s");
+        await vi.advanceTimersByTimeAsync(0);
+        streamer.replaceByPrefix("s1", "⏳one", "⏳ intermediate");
+        streamer.replaceByPrefix("s1", "⏳one", terminal);
+        await streamer.breakSession("s1", "session_idle");
+        expect(editText).toHaveBeenCalledTimes(1);
+
+        editText.mockResolvedValue(undefined);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(editText).toHaveBeenCalledTimes(2);
+        expect(editText).toHaveBeenLastCalledWith("s1", 1, terminal);
+        expect(sendText).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("does not hold new tools or standalone delivery behind a recovery timer", async () => {
+      const { streamer, sendText, editText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+      await vi.advanceTimersByTimeAsync(0);
+      editText.mockRejectedValue(networkError);
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ updated");
+      await vi.advanceTimersByTimeAsync(0);
+      streamer.replaceByPrefix("s1", "⏳two", "second tool");
+      await vi.advanceTimersByTimeAsync(0);
+      await streamer.sendStandalone("s1", "independent card");
+      expect(sendText.mock.calls.map((call) => call[1])).toEqual([
+        "⏳ running",
+        "second tool",
+        "independent card",
+      ]);
+      expect(editText).toHaveBeenCalledTimes(1);
+      streamer.clearAll("test_cleanup");
+    });
+
+    it("accepts completion during the outage even when idle was already observed", async () => {
+      const { streamer, sendText, editText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+      await vi.advanceTimersByTimeAsync(0);
+      editText.mockRejectedValueOnce(networkError);
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ updated");
+      await vi.advanceTimersByTimeAsync(0);
+      await streamer.breakSession("s1", "session_idle");
+      streamer.replaceByPrefix("s1", "⏳one", "done");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(editText).toHaveBeenLastCalledWith("s1", 1, "done");
+      expect(sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps completion when idle arrives during an in-flight recovery attempt", async () => {
+      const { streamer, sendText, editText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+      await vi.advanceTimersByTimeAsync(0);
+      let rejectEdit: (error: unknown) => void = () => {};
+      editText.mockRejectedValueOnce(networkError).mockImplementationOnce(
+        () =>
+          new Promise<undefined>((_resolve, reject) => {
+            rejectEdit = reject;
+          }),
+      );
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ updated");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(editText).toHaveBeenCalledTimes(2);
+      const idle = streamer.breakSession("s1", "session_idle");
+      streamer.replaceByPrefix("s1", "⏳one", "done");
+      rejectEdit(networkError);
+      await idle;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(editText).toHaveBeenLastCalledWith("s1", 1, "done");
+      expect(sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([false, true])(
+      "does not revive an interrupted recovering call with terminal text already present: %s",
+      async (alreadyTerminal) => {
+        const { streamer, sendText, editText, networkError } = createStreamer();
+        streamer.replaceByPrefix("s1", "⏳one", "⏳ 💻 bash sleep");
+        await vi.advanceTimersByTimeAsync(0);
+        editText.mockRejectedValueOnce(networkError);
+        streamer.replaceByPrefix("s1", "⏳one", "⏳ 💻 bash sleep · 🕒 20s");
+        await vi.advanceTimersByTimeAsync(0);
+        if (alreadyTerminal) {
+          streamer.replaceByPrefix("s1", "⏳one", "💻 bash sleep");
+        }
+        await streamer.breakSession("s1", "session_interrupted");
+        streamer.replaceByPrefix("s1", "⏳one", "late successful result");
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(editText).toHaveBeenLastCalledWith(
+          "s1", 1, alreadyTerminal ? "💻 bash sleep" : "💻 bash sleep · 🕒 20s",
+        );
+        expect(sendText).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["assistant_reply_started", "thinking_started", "session_error"])(
+      "keeps pending terminal recovery across %s",
+      async (reason) => {
+        const { streamer, sendText, editText, networkError } = createStreamer();
+        streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+        await vi.advanceTimersByTimeAsync(0);
+        editText.mockRejectedValueOnce(networkError);
+        streamer.replaceByPrefix("s1", "⏳one", "done");
+        await vi.advanceTimersByTimeAsync(0);
+        await streamer.breakSession("s1", reason);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(editText).toHaveBeenLastCalledWith("s1", 1, "done");
+        expect(editText).toHaveBeenCalledTimes(2);
+        expect(sendText).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("recovers a pending document-companion deletion instead of restoring its text", async () => {
+      const { streamer, sendText, editText, deleteText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳file", "⏳ writing");
+      await vi.advanceTimersByTimeAsync(0);
+      editText.mockRejectedValueOnce(networkError);
+      streamer.replaceByPrefix("s1", "⏳file", "⏳ writing · 🕒 20s");
+      await vi.advanceTimersByTimeAsync(0);
+      streamer.removeByPrefix("s1", "⏳file", "default", true);
+      streamer.beginDocumentBoundary("s1");
+      await streamer.flushSession("s1", "tool_file_boundary");
+      streamer.endDocumentBoundary("s1");
+      deleteText.mockRejectedValueOnce(networkError);
+      await streamer.breakSession("s1", "session_idle");
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(deleteText).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(deleteText).toHaveBeenCalledTimes(2);
+      expect(deleteText).toHaveBeenLastCalledWith("s1", 1);
+      expect(editText).toHaveBeenCalledTimes(1);
+      expect(sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it("retains a deletion whose first network failure happens at a document boundary", async () => {
+      const { streamer, deleteText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳file", "⏳ writing");
+      await vi.advanceTimersByTimeAsync(0);
+      deleteText.mockRejectedValueOnce(networkError);
+      streamer.removeByPrefix("s1", "⏳file", "default", true);
+      streamer.beginDocumentBoundary("s1");
+      await streamer.flushSession("s1", "tool_file_boundary");
+      streamer.endDocumentBoundary("s1");
+      await streamer.breakSession("s1", "session_idle");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(deleteText).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(["clearSession", "clearAll"] as const)(
+      "cancels pending recovery on %s",
+      async (clear) => {
+        const { streamer, editText, networkError } = createStreamer();
+        streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+        await vi.advanceTimersByTimeAsync(0);
+        editText.mockRejectedValue(networkError);
+        streamer.replaceByPrefix("s1", "⏳one", "done");
+        await vi.advanceTimersByTimeAsync(0);
+        if (clear === "clearSession") {
+          streamer.clearSession("s1", "test_cleanup");
+        } else {
+          streamer.clearAll("test_cleanup");
+        }
+        await vi.advanceTimersByTimeAsync(60000);
+        expect(editText).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("does not reconstruct an ambiguous creation at later updates or boundaries", async () => {
+      const { streamer, sendText, networkError } = createStreamer();
+      sendText.mockRejectedValueOnce(networkError);
+      streamer.replaceByPrefix("s1", "⏳lost", "⏳ lost");
+      await vi.advanceTimersByTimeAsync(0);
+      streamer.replaceByPrefix("s1", "⏳other", "other");
+      await vi.advanceTimersByTimeAsync(0);
+      await streamer.breakSession("s1", "assistant_reply_started");
+      streamer.replaceByPrefix("s1", "⏳lost", "lost finished");
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(sendText.mock.calls.map((call) => call[1])).toEqual(["⏳ lost", "other"]);
+    });
+
+    it("does not retry an ambiguous new split part just because an earlier ID is known", async () => {
+      const { streamer, sendText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+      await vi.advanceTimersByTimeAsync(0);
+      sendText.mockRejectedValueOnce(networkError);
+      streamer.replaceByPrefix("s1", "⏳one", "x".repeat(5000));
+      await vi.advanceTimersByTimeAsync(0);
+      await streamer.breakSession("s1", "session_idle");
+      streamer.replaceByPrefix("s1", "⏳one", "final");
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(sendText).toHaveBeenCalledTimes(2);
+    });
+
+    it("stops recovery when a later attempt returns a permanent error", async () => {
+      const { streamer, editText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+      await vi.advanceTimersByTimeAsync(0);
+      editText
+        .mockRejectedValueOnce(networkError)
+        .mockRejectedValue(new Error("400: message not found"));
+      streamer.replaceByPrefix("s1", "⏳one", "done");
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(editText).toHaveBeenCalledTimes(2);
+      await streamer.breakSession("s1", "session_idle");
+      expect(Reflect.get(streamer, "allStates")).toHaveProperty("size", 0);
+      streamer.replaceByPrefix("s1", "⏳one", "late result");
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(editText).toHaveBeenCalledTimes(2);
+    });
+
+    it("backs off repeated failures without holding the break and resets after success", async () => {
+      const { streamer, editText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+      await vi.advanceTimersByTimeAsync(0);
+      streamer.pinEntry("s1", "⏳one");
+      editText.mockRejectedValue(networkError);
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ updated");
+      await vi.advanceTimersByTimeAsync(0);
+      await streamer.breakSession("s1", "session_idle");
+      await vi.advanceTimersByTimeAsync(999);
+      expect(editText).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(editText).toHaveBeenCalledTimes(2);
+      editText.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(editText).toHaveBeenCalledTimes(3);
+      editText.mockRejectedValueOnce(networkError);
+      streamer.replaceByPrefix("s1", "⏳one", "done");
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(editText).toHaveBeenCalledTimes(5);
+      streamer.clearAll("test_cleanup");
+    });
+
+    it("does not extend recovery to subagent streams or standalone edits", async () => {
+      const { streamer, editText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "🧩", "card", "subagent:card");
+      await vi.advanceTimersByTimeAsync(0);
+      editText.mockRejectedValue(networkError);
+      streamer.replaceByPrefix("s1", "🧩", "card done", "subagent:card");
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(editText).toHaveBeenCalledTimes(1);
+      await expect(streamer.editStandalone("s1", 42, "todo")).rejects.toBe(networkError);
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(editText).toHaveBeenCalledTimes(2);
+    });
+
+    it("recovers a known split part with a wrapped cause without opening another bubble", async () => {
+      const { streamer, sendText, editText } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "a".repeat(5000));
+      await vi.advanceTimersByTimeAsync(0);
+      editText
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(
+          new TypeError("fetch failed", { cause: { code: "ETIMEDOUT" } }),
+        );
+      streamer.replaceByPrefix("s1", "⏳one", "b".repeat(5000));
+      await vi.advanceTimersByTimeAsync(0);
+      await streamer.breakSession("s1", "assistant_reply_started");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(editText).toHaveBeenLastCalledWith("s1", 2, "b".repeat(1000));
+      expect(sendText).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps recovery delay capped during a long outage", async () => {
+      const { streamer, editText, networkError } = createStreamer();
+      streamer.replaceByPrefix("s1", "⏳one", "⏳ running");
+      await vi.advanceTimersByTimeAsync(0);
+      editText.mockRejectedValue(networkError);
+      streamer.replaceByPrefix("s1", "⏳one", "done");
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1000 + 2000 + 4000 + 8000 + 16000);
+      expect(editText).toHaveBeenCalledTimes(6);
+      await vi.advanceTimersByTimeAsync(29999);
+      expect(editText).toHaveBeenCalledTimes(6);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(editText).toHaveBeenCalledTimes(7);
+      streamer.clearAll("test_cleanup");
+    });
   });
 
   describe("pinned entries", () => {
@@ -900,9 +1262,9 @@ describe("bot/streaming/tool-call-streamer", () => {
       });
 
       streamer.append("s1", "default line");
-      streamer.append("s1", "todo line", "todo");
+      streamer.append("s1", "subagent card", "subagent:card");
       const broken = streamer.breakSession("s1", "test_break");
-      streamer.append("s1", "later todo line", "todo");
+      streamer.append("s1", "later subagent card", "subagent:card");
       await vi.waitFor(() => {
         expect(sendText).toHaveBeenCalledTimes(1);
       });
@@ -912,8 +1274,8 @@ describe("bot/streaming/tool-call-streamer", () => {
       await vi.advanceTimersByTimeAsync(1000);
 
       const sentTexts = sendText.mock.calls.map((call) => call[1]);
-      expect(sentTexts).toContain("todo line");
-      expect(sentTexts).toContain("later todo line");
+      expect(sentTexts).toContain("subagent card");
+      expect(sentTexts).toContain("later subagent card");
     });
   });
 });

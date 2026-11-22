@@ -52,13 +52,15 @@ type PendingPermission = NonNullable<
 
 let attachPresentation: AttachPresentationDeps | null = null;
 
+let restoreInFlight: Promise<boolean> | null = null;
+
 export function configureAttachPresentation(deps: AttachPresentationDeps | null): void {
   attachPresentation = deps;
 }
 
 export type AttachStateDeps = Pick<AppContainer, "attachManager">;
 
-export type DetachSessionDeps = Pick<AppContainer, "attachManager" | "resetAggregator">;
+export type DetachSessionDeps = Pick<AppContainer, "attachManager" | "resetAggregator" | "goalManager">;
 
 type AttachRestoreDeps = Pick<
   AppContainer,
@@ -73,6 +75,7 @@ export interface AttachSessionDeps extends AttachRestoreDeps {
   forceFullRestore?: boolean | undefined;
   /** The session was created a moment ago, so it has no values to load. */
   sessionCreated?: boolean | undefined;
+  goalService?: Pick<AppContainer, "goalService">["goalService"] | undefined;
 }
 
 export interface AttachSessionResult {
@@ -326,6 +329,8 @@ export async function attachToSession(deps: AttachSessionDeps): Promise<AttachSe
   const { attachManager, permissionManager, questionManager, summaryAggregator } = deps;
   const alreadyAttached = attachManager.isAttachedSession(session.id, session.directory);
 
+  deps.goalService?.follow(session.id);
+
   await attachPresentation?.preparePinnedSession({
     api: bot.api,
     chatId,
@@ -406,6 +411,8 @@ export async function attachToSession(deps: AttachSessionDeps): Promise<AttachSe
       : 0;
   }
 
+  await deps.goalService?.refresh(session.id, session.directory, false);
+
   return {
     busy,
     alreadyAttached,
@@ -414,7 +421,36 @@ export async function attachToSession(deps: AttachSessionDeps): Promise<AttachSe
   };
 }
 
+/**
+ * Restores the followed session, joining a restore already in progress: the OpenCode ready
+ * notification and the Telegram polling start both restore at startup, and running both in
+ * parallel draws two dashboards (two pinned messages) for the same session. A joined restore
+ * that failed (for example, the server was not ready yet) is attempted once more, so the
+ * caller whose condition just changed still gets its own attempt.
+ */
 export async function restoreAttachedCurrentSession(
+  deps: RestoreAttachedCurrentSessionDeps,
+): Promise<boolean> {
+  if (restoreInFlight) {
+    logger.debug("[Attach] Followed session restore already in progress; joining it");
+    const joined = await restoreInFlight;
+    if (joined) {
+      return true;
+    }
+    if (restoreInFlight) {
+      // Another caller already retried after the failed restore; join that attempt.
+      return restoreInFlight;
+    }
+    logger.debug("[Attach] Joined restore failed; retrying");
+  }
+
+  restoreInFlight = performAttachedCurrentSessionRestore(deps).finally(() => {
+    restoreInFlight = null;
+  });
+  return restoreInFlight;
+}
+
+async function performAttachedCurrentSessionRestore(
   deps: RestoreAttachedCurrentSessionDeps,
 ): Promise<boolean> {
   const currentProject = getCurrentProject();
@@ -452,6 +488,11 @@ export async function restoreAttachedCurrentSession(
     logger.error("[Attach] Failed to restore followed session on startup:", error);
     return false;
   }
+}
+
+/** Clears the in-flight restore guard (tests). */
+export function __resetAttachRestoreForTests(): void {
+  restoreInFlight = null;
 }
 
 /**
@@ -574,6 +615,7 @@ export async function restorePendingInteractionsAfterReconnect(
 }
 
 export function detachAttachedSession(reason: string, deps: DetachSessionDeps): void {
+  deps.goalManager.clear();
   if (!deps.attachManager.isAttached()) {
     return;
   }

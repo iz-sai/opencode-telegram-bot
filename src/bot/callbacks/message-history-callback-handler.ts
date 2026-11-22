@@ -3,7 +3,7 @@ import type { AppContainer } from "../../app/bootstrap/app-container.js";
 import { config } from "../../config.js";
 import type { InteractionState } from "../../app/types/interaction.js";
 import { opencodeClient } from "../../opencode/client.js";
-import { setCurrentSession } from "../../app/services/session-service.js";
+import { getCurrentSession, setCurrentSession } from "../../app/services/session-service.js";
 import { applySessionSettings } from "../../app/services/session-settings-service.js";
 import { getStoredAgent } from "../../app/services/agent-selection-service.js";
 import { getStoredModel } from "../../app/services/model-selection-service.js";
@@ -18,8 +18,12 @@ import { logger } from "../../utils/logger.js";
 import { cancelMenu } from "./feedback.js";
 import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { renderAssistantFinalPartsSafe } from "../messages/assistant-rendering.js";
+import {
+  prepareAssistantDocuments,
+  deliverAssistantDocuments,
+} from "../messages/assistant-document-delivery.js";
 import { replyBusyBlocked } from "../messages/busy-blocked-renderer.js";
-import { sendRenderedBotPart } from "../messages/telegram-text.js";
+import { AGENT_TEXT_LINK_PREVIEW_OPTIONS, sendRenderedBotPart } from "../messages/telegram-text.js";
 import {
   buildMessageDetailKeyboard,
   buildMessagesListKeyboard,
@@ -150,7 +154,11 @@ function parseMessagesMetadata(state: InteractionState | null): MessagesMetadata
 
   if (stage === "detail") {
     const selectedIndex = state.metadata.selectedIndex;
-    if (typeof selectedIndex !== "number" || !Number.isInteger(selectedIndex) || selectedIndex < 0) {
+    if (
+      typeof selectedIndex !== "number" ||
+      !Number.isInteger(selectedIndex) ||
+      selectedIndex < 0
+    ) {
       return null;
     }
 
@@ -182,19 +190,30 @@ async function sendLatestAssistantResponse(
   sessionId: string,
   directory: string,
 ): Promise<void> {
-  const responseText = await loadLatestAssistantResponse(sessionId, directory);
-  if (!responseText) {
+  const response = await loadLatestAssistantResponse(sessionId, directory);
+  if (!response) {
     return;
   }
 
-  const parts = renderAssistantFinalPartsSafe(responseText);
+  const prepared = await prepareAssistantDocuments(
+    response.text,
+    directory,
+    () => getCurrentSession()?.id === sessionId,
+  );
+  const parts = renderAssistantFinalPartsSafe(
+    prepared.text,
+    directory,
+    () => getCurrentSession()?.id === sessionId,
+  );
   for (const part of parts) {
     await sendRenderedBotPart({
       api,
       chatId,
       part,
+      options: AGENT_TEXT_LINK_PREVIEW_OPTIONS,
     });
   }
+  if (response.completed) await deliverAssistantDocuments(prepared, api, chatId, { disable_notification: true });
 }
 
 export async function handleMessagesCallback(

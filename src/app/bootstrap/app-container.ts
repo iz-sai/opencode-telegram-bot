@@ -14,13 +14,16 @@ import { AttachManager } from "../managers/attach-manager.js";
 import { BackgroundSessionTracker } from "../managers/background-session-manager.js";
 import { ExternalUserInputSuppressionManager } from "../managers/external-input-suppression-manager.js";
 import { ForegroundSessionState } from "../managers/foreground-session-state-manager.js";
+import { GoalManager } from "../managers/goal-manager.js";
 import { InteractionManager, type InteractionErrorScope } from "../managers/interaction-manager.js";
 import { PermissionManager } from "../managers/permission-manager.js";
 import { QuestionManager } from "../managers/question-manager.js";
 import { RenameManager } from "../managers/rename-manager.js";
 import { TaskCreationManager } from "../managers/scheduled-task-creation-manager.js";
 import { SummaryAggregator } from "../managers/summary-aggregation-manager.js";
+import { GoalService } from "../services/goal-service.js";
 import { HealthServer } from "../services/health-server-service.js";
+import { formatDashboardGoalLine } from "../formatters/goal-text.js";
 import { ScheduledTaskRuntime } from "../services/scheduled-task-runtime-service.js";
 
 const HEARTBEAT_INTERVAL_MS = 5000;
@@ -39,6 +42,8 @@ export interface AppContainer {
   readonly backgroundSessionTracker: BackgroundSessionTracker;
   readonly externalUserInputSuppressionManager: ExternalUserInputSuppressionManager;
   readonly foregroundSessionState: ForegroundSessionState;
+  readonly goalManager: GoalManager;
+  readonly goalService: GoalService;
   readonly healthServer: HealthServer;
   readonly interactionManager: InteractionManager;
   readonly keyboardManager: KeyboardManager;
@@ -67,13 +72,11 @@ export interface AppContainer {
   resetAggregator(): void;
   /** Clears response streams, tool trackers, background tracking and run state. */
   resetRuntimeStreams(reason: string): void;
-  /** Stops following background operations; their lines and cards stay as they are. */
-  stopBackgroundOperations(reason: string, sessionId?: string): void;
-  /** Stops following background command lines only; subagent cards keep being followed. */
-  stopBackgroundCommands(reason: string, sessionId?: string): void;
+  /** Background commands and subagent cards of the session the bot still follows. */
+  countBackgroundOperations(sessionId: string): number;
   /**
-   * Ends the followed session's running subagent cards as interrupted; a background one
-   * still takes the real end its subagent reports later.
+   * Ends the followed session's running foreground subagent cards as interrupted; a
+   * background one keeps running until its subagent reports its own end.
    */
   interruptSubagents(reason: string): void;
   /**
@@ -90,6 +93,10 @@ export interface AppContainer {
 
 export function createAppContainer(): AppContainer {
   const foregroundSessionState = new ForegroundSessionState();
+  const goalManager = new GoalManager();
+  const goalService = new GoalService(goalManager);
+  const pinnedMessageManager = new PinnedMessageManager();
+  pinnedMessageManager.setGoalLine(() => formatDashboardGoalLine(goalManager.snapshot().goal));
   const interactionManager = new InteractionManager();
   const opencodeReadyLifecycle = new OpencodeReadyLifecycle();
   const summaryAggregator = new SummaryAggregator();
@@ -115,13 +122,15 @@ export function createAppContainer(): AppContainer {
     backgroundSessionTracker: new BackgroundSessionTracker(),
     externalUserInputSuppressionManager: new ExternalUserInputSuppressionManager(),
     foregroundSessionState,
+    goalManager,
+    goalService,
     healthServer: new HealthServer(),
     interactionManager,
-    keyboardManager: new KeyboardManager(),
+    keyboardManager: new KeyboardManager(goalManager),
     opencodeAutoRestartService: new OpencodeAutoRestartService(opencodeReadyLifecycle),
     opencodeReadyLifecycle,
     permissionManager: new PermissionManager(interactionManager),
-    pinnedMessageManager: new PinnedMessageManager(),
+    pinnedMessageManager,
     questionManager: new QuestionManager(interactionManager),
     renameManager: new RenameManager(interactionManager),
     scheduledTaskRuntime: new ScheduledTaskRuntime(foregroundSessionState),
@@ -151,10 +160,8 @@ export function createAppContainer(): AppContainer {
     resetInteractionError: (scope, reason) => interactionManager.clearErrorScope(scope, reason),
     resetAggregator: () => summaryAggregator.clear(),
     resetRuntimeStreams: (reason) => eventSubscriptionService.clearRuntimeState(reason),
-    stopBackgroundOperations: (reason, sessionId) =>
-      eventSubscriptionService.stopBackgroundOperations(reason, sessionId),
-    stopBackgroundCommands: (reason, sessionId) =>
-      eventSubscriptionService.stopBackgroundCommands(reason, sessionId),
+    countBackgroundOperations: (sessionId) =>
+      eventSubscriptionService.countBackgroundOperations(sessionId),
     interruptSubagents: (reason) => eventSubscriptionService.interruptSubagents(reason),
     endRunLostWithServer: (reason) => eventSubscriptionService.endRunLostWithServer(reason),
 

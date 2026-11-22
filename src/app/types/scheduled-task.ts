@@ -1,3 +1,4 @@
+import type { AssistantRunStep } from "../formatters/assistant-run-footer-formatter.js";
 import type { ModelInfo } from "./model.js";
 
 export type ScheduledTaskKind = "cron" | "once";
@@ -33,6 +34,8 @@ export interface ScheduledTaskBase {
 export interface ScheduledCronTask extends ScheduledTaskBase {
   kind: "cron";
   cron: string;
+  enabled?: boolean;
+  activationPending?: boolean | undefined;
   runAt?: undefined;
 }
 
@@ -94,6 +97,7 @@ export function cloneScheduledTaskModel(model: ScheduledTaskModel): ScheduledTas
 export function cloneScheduledTask(task: ScheduledTask): ScheduledTask {
   return {
     ...task,
+    ...(task.kind === "cron" ? { enabled: task.enabled ?? true } : {}),
     // Backfill for tasks persisted before the agent field existed (they ran with "build").
     agent: task.agent ?? DEFAULT_TASK_AGENT,
     model: cloneScheduledTaskModel(task.model),
@@ -106,10 +110,15 @@ export interface ScheduledTaskExecutionResult {
   startedAt: string;
   finishedAt: string;
   resultText: string | null;
+  /** Untrimmed successful response used for delivery filtering. Absent on error. */
+  rawResultText?: string;
   errorMessage: string | null;
+  /** Assistant steps of a successful run, for the footer's speed. Absent on error. */
+  steps?: AssistantRunStep[];
 }
 
 export interface QueuedScheduledTaskDelivery {
+  projectDirectory?: string;
   taskId: string;
   scheduleSummary: string;
   prompt: string;

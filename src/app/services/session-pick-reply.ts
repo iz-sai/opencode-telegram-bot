@@ -27,6 +27,8 @@ export interface EligibleReply {
   text: string;
   parentId: string | null;
   created: number;
+  /** When the reply finished, or undefined while it is still streaming. */
+  completed?: number | undefined;
 }
 
 function extractText(parts: SessionPickPart[]): string | null {
@@ -74,6 +76,7 @@ export function findEligibleReply(
         text,
         parentId: message.info.parentID ?? null,
         created,
+        completed: message.info.time?.completed,
       };
     }
   }
@@ -108,6 +111,23 @@ export function findMessageById(
   messageId: string,
 ): SessionPickMessage | null {
   return messages.find((message) => message.info.id === messageId) ?? null;
+}
+
+/**
+ * The newest user input the transcript does not already cover: a message created after the
+ * shown reply started, still waiting for its own reply. Compared by time rather than by the
+ * reply's parent, because the V2 adapter carries no parent link.
+ */
+export function findPendingUserPrompt(
+  messages: SessionPickMessage[],
+  shownReplyCreated: number,
+): SessionPickMessage | null {
+  const latest = findLatestUserPrompt(messages);
+  if (!latest) {
+    return null;
+  }
+
+  return (latest.info.time?.created ?? 0) > shownReplyCreated ? latest : null;
 }
 
 export function buildSessionPickQuote(message: SessionPickMessage): QuotedNotification | null {

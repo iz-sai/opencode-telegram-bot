@@ -3,6 +3,7 @@ import type { AppContainer } from "../../app/bootstrap/app-container.js";
 import { opencodeClient } from "../../opencode/client.js";
 import { getCurrentSession } from "../../app/services/session-service.js";
 import { logger } from "../../utils/logger.js";
+import { formatAbortWithGoalPause } from "../../app/formatters/goal-text.js";
 import { t } from "../../i18n/index.js";
 import { markAttachedSessionIdle } from "../../app/services/attach-service.js";
 import { clearPromptResponseMode } from "../handlers/prompt.js";
@@ -17,11 +18,12 @@ export type AbortCommandDeps = Pick<
   AppContainer,
   | "assistantRunState"
   | "attachManager"
+  | "countBackgroundOperations"
   | "foregroundSessionState"
+  | "goalService"
   | "interruptSubagents"
+  | "keyboardManager"
   | "resetInteractions"
-  | "stopBackgroundCommands"
-  | "stopBackgroundOperations"
 >;
 
 interface AbortCurrentOperationOptions {
@@ -89,6 +91,12 @@ export async function abortCurrentOperation(
 
   try {
     deps.resetInteractions("abort_command");
+    // V2 reports /abort as the same interrupted idle as a client stop. Mark the run
+    // footerless before any await, so that idle cannot send a footer while abort is in flight.
+    const sessionToAbort = getCurrentSession();
+    if (sessionToAbort) {
+      deps.assistantRunState.suppressFooter(sessionToAbort.id);
+    }
     // Awaited: a prompt still waiting in the OpenCode V2 inbox must not start a new turn
     // once the current one is interrupted.
     await withdrawPromptQueue("abort_command");
@@ -105,15 +113,33 @@ export async function abortCurrentOperation(
       return;
     }
 
-    // What ran in the background stays in the chat as it was at the abort. Subagent cards
-    // wait for the answer: interrupted on success, left as they were otherwise.
-    deps.stopBackgroundCommands("abort_command", currentSession.id);
-    const leaveSubagentCards = () =>
-      deps.stopBackgroundOperations("abort_command", currentSession.id);
+    const hadGoalRow = deps.keyboardManager.getGoalLabels().length > 0;
+    const pauseOutcome = await deps.goalService.pauseForAbort(
+      currentSession.id,
+      currentSession.directory,
+    );
+    const withPause = (text: string) => formatAbortWithGoalPause(text, pauseOutcome);
 
     let waitingMessageId: number | null = null;
     let chatId: number | null = null;
-    let abortConfirmed = false;
+
+    const finishReply = async (text: string): Promise<void> => {
+      if (!notifyUser || chatId === null || waitingMessageId === null) return;
+      if (
+        hadGoalRow ||
+        pauseOutcome.kind !== "silent" ||
+        deps.keyboardManager.getGoalLabels().length > 0
+      ) {
+        // A reply keyboard cannot be attached by editing the progress message.
+        const keyboard = deps.keyboardManager.getKeyboard();
+        await ctx.reply(withPause(text), keyboard ? { reply_markup: keyboard } : {});
+        await ctx.api.deleteMessage(chatId, waitingMessageId).catch((error) => {
+          logger.debug("[Abort] Could not remove the progress message", error);
+        });
+      } else {
+        await ctx.api.editMessageText(chatId, waitingMessageId, withPause(text));
+      }
+    };
 
     if (notifyUser) {
       // No reply_markup here: this message is edited below, and Telegram
@@ -124,7 +150,6 @@ export async function abortCurrentOperation(
 
       if (!chatId) {
         logger.warn("[Abort] Chat context is missing while aborting active session");
-        leaveSubagentCards();
         return;
       }
     }
@@ -146,19 +171,17 @@ export async function abortCurrentOperation(
 
       if (abortError) {
         logger.warn("[Abort] Abort request failed:", abortError);
-        leaveSubagentCards();
         await releaseAbortBusyState(deps, currentSession.id, "abort_unconfirmed");
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
-          await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_unconfirmed"));
+          await finishReply(t("stop.warn_unconfirmed"));
         }
         return;
       }
 
       if (abortResult !== true) {
-        leaveSubagentCards();
         await releaseAbortBusyState(deps, currentSession.id, "abort_maybe_finished");
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
-          await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_maybe_finished"));
+          await finishReply(t("stop.warn_maybe_finished"));
         }
         return;
       }
@@ -173,34 +196,38 @@ export async function abortCurrentOperation(
         await releaseAbortBusyState(deps, currentSession.id, "abort_confirmed");
         try {
           if (notifyUser && chatId !== null && waitingMessageId !== null) {
-            await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.success"));
+            // Background operations are not stopped by the bot: they end with what OpenCode
+            // reports about them later, so the reply says they are still coming.
+            const backgroundCount = deps.countBackgroundOperations(currentSession.id);
+            await finishReply(
+              backgroundCount > 0
+                ? t("stop.success_background_running", { count: backgroundCount })
+                : t("stop.success"),
+            );
           }
         } finally {
           // The abort succeeded even when its reply could not be shown.
-          abortConfirmed = true;
           deps.interruptSubagents("abort_command");
         }
       } else {
-        leaveSubagentCards();
+        // The turn is still going, so a later completion keeps today's footer.
+        deps.assistantRunState.clearFooterSuppression(currentSession.id);
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
-          await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_still_busy"));
+          await finishReply(t("stop.warn_still_busy"));
         }
       }
     } catch (error) {
       clearTimeout(timeoutId);
-      if (!abortConfirmed) {
-        leaveSubagentCards();
-      }
       await releaseAbortBusyState(deps, currentSession.id, "abort_error");
 
       if (error instanceof Error && error.name === "AbortError") {
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
-          await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_timeout"));
+          await finishReply(t("stop.warn_timeout"));
         }
       } else {
         logger.error("[Abort] Error while aborting session:", error);
         if (notifyUser && chatId !== null && waitingMessageId !== null) {
-          await ctx.api.editMessageText(chatId, waitingMessageId, t("stop.warn_local_only"));
+          await finishReply(t("stop.warn_local_only"));
         }
       }
     }

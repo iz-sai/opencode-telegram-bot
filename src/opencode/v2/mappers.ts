@@ -2,7 +2,6 @@ import type {
   Agent,
   AssistantMessage,
   Command,
-  FileDiff,
   FilePartInput,
   GlobalSession,
   McpStatus,
@@ -15,6 +14,7 @@ import type {
   QuestionInfo,
   QuestionRequest,
   Session,
+  SnapshotFileDiff,
   TextPartInput,
   ToolState,
   UserMessage,
@@ -36,6 +36,7 @@ import type {
   SkillInfo,
 } from "@opencode/client";
 import { isRecord } from "../../utils/type-guards.js";
+import { isGoalInternalMetadata } from "./goal-message.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -261,7 +262,9 @@ function toV1AssistantMessage(
     time: {
       created: message.time.created,
       ...(message.time.completed ? { completed: message.time.completed } : {}),
-    },
+      // The V1 SDK type has no stream time; the poll still needs it for the speed sum.
+      ...(message.time.streamed !== undefined ? { streamed: message.time.streamed } : {}),
+    } as AssistantMessage["time"],
     ...(message.error ? { error: toV1ErrorPayload(message.error) } : {}),
     parentID: "",
     modelID: message.model.id,
@@ -312,6 +315,9 @@ export function toV1Message(
   directory: string,
 ): V1MessageWithParts | null {
   if (message.type === "user") {
+    if (isGoalInternalMetadata(message.metadata)) {
+      return null;
+    }
     return toV1UserMessage(message, sessionID);
   }
   if (message.type === "assistant") {
@@ -320,9 +326,9 @@ export function toV1Message(
   return null;
 }
 
-export function toV1FileDiff(diff: FileDiffInfo): FileDiff {
+export function toV1FileDiff(diff: FileDiffInfo): SnapshotFileDiff {
   return {
-    path: diff.file,
+    file: diff.file,
     status: diff.status,
     additions: diff.additions,
     deletions: diff.deletions,

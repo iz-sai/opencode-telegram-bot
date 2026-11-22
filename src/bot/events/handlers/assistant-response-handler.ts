@@ -9,6 +9,7 @@ import { promptQueue, type QueuedPrompt } from "../../../app/managers/prompt-que
 import { promptHandover } from "../../../app/managers/prompt-handover-manager.js";
 import { buildExternalUserInputNotification } from "../../../app/services/external-user-input-service.js";
 import { getCurrentSession } from "../../../app/services/session-service.js";
+import { markSessionReplyRead } from "../../../app/services/session-reply-read-service.js";
 import { sendBotText } from "../../messages/telegram-text.js";
 import { closeForegroundRun } from "./run-close.js";
 import { finalizeAssistantResponse } from "../../streaming/finalize-assistant-response.js";
@@ -24,7 +25,14 @@ import { deliverExternalUserInputNotification } from "../../messages/external-us
 import { telegramOutageNoticeService } from "../../../app/services/telegram-outage-notice-service.js";
 import { flushTelegramOutageNotices } from "../../telegram-outage-notices.js";
 import { getThinkingStreamId, type SessionRuntimeState } from "../session-runtime-state.js";
+import { hasMarkdownImages } from "../../render/block-parser.js";
 import type { StreamingMessagePayload } from "../../streaming/response-streamer.js";
+import {
+  prepareAssistantDocuments,
+  deliverAssistantDocuments,
+} from "../../messages/assistant-document-delivery.js";
+import { collectAssistantFileLinks } from "../../render/assistant-file-links.js";
+import { config } from "../../../config.js";
 import {
   getReplyKeyboard,
   isCompactProgressMode,
@@ -68,6 +76,7 @@ async function pickUpInboxPrompt(
 
   try {
     if (item.inbox?.delivery === "queue" && deps.assistantRunState.hasRun(sessionId)) {
+      deps.assistantRunState.sealRun(sessionId);
       const completedRun = deps.assistantRunState.finishRun(sessionId, "inbox_queue_pickup");
       clearPromptResponseMode(sessionId);
       await closeForegroundRun(deps, sessionId, destination, completedRun, "inbox_queue_pickup");
@@ -108,6 +117,7 @@ async function completeThinkingStream(
   sessionId: string,
   messageId: string,
 ): Promise<void> {
+  await runtime.waitForReplyDocuments(sessionId, messageId);
   const sections = runtime.getThinkingSections(sessionId, messageId);
   // Re-render from the sections: the streamed payload keeps its trailing
   // block literal because it was still being written.
@@ -165,10 +175,26 @@ export function keepAssistantDraftsBeforePrompt(
       // fresh draft of the same text, which completion would send again.
       const previousDeliveredText = runtime.markAssistantTextDelivered(sessionId, messageId, text);
       try {
+        const prepared = await prepareAssistantDocuments(
+          undeliveredText,
+          getCurrentSession()?.id === sessionId ? getCurrentSession()?.directory : undefined,
+          () => policy.isForegroundSession(sessionId),
+          text,
+        );
+        prepared.documents = runtime.takeAssistantDocuments(
+          sessionId,
+          messageId,
+          prepared.documents,
+        );
         await finalizeAssistantResponse({
           sessionId,
           messageId,
-          messageText: undeliveredText,
+          messageText: prepared.text,
+          strictFinalPayload: prepared.documents.length > 0,
+          afterTextAccepted: () =>
+            deliverAssistantDocuments(prepared, destination.api, destination.chatId, {
+              disable_notification: true,
+            }),
           responseStreamer: {
             complete: (completeSessionId, completeMessageId, payload, options) =>
               runtime.completeAssistantDraftEarly(
@@ -181,7 +207,12 @@ export function keepAssistantDraftsBeforePrompt(
           // The prompt flushes tool output itself before showing up.
           flushPendingServiceMessages: async () => {},
           prepareStreamingPayload: prepareAssistantFinalStreamingPayload,
-          renderFinalParts: (partText) => renderAssistantFinalPartsSafe(partText),
+          renderFinalParts: (partText) =>
+            renderAssistantFinalPartsSafe(
+              partText,
+              getCurrentSession()?.id === sessionId ? getCurrentSession()?.directory : undefined,
+              () => policy.isForegroundSession(sessionId),
+            ),
           getReplyKeyboard: () => getReplyKeyboard(deps),
           sendRenderedPart: async (part, options) => {
             await runtime.delivery.sendRenderedPart(
@@ -201,11 +232,19 @@ export function keepAssistantDraftsBeforePrompt(
           );
         }
       } catch (error) {
-        runtime.markAssistantTextDelivered(sessionId, messageId, previousDeliveredText);
+        if (!hasMarkdownImages(text) &&
+            (config.bot.messageFormatMode !== "markdown" || collectAssistantFileLinks(text).length === 0)) {
+          runtime.markAssistantTextDelivered(sessionId, messageId, previousDeliveredText);
+        } else {
+          telegramOutageNoticeService.markAssistantReplyUndelivered();
+          await flushTelegramOutageNotices({ api: destination.api, chatId: destination.chatId });
+        }
         logger.error(
           `[Bot] Failed to keep assistant draft before a prompt: session=${sessionId}, message=${messageId}`,
           error,
         );
+      } finally {
+        runtime.releaseReplyDocuments(sessionId, messageId);
       }
     }
   });
@@ -320,6 +359,14 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
     }
 
     runtime.recordAssistantText(sessionId, messageId, messageText);
+    if (
+      config.bot.messageFormatMode === "markdown" &&
+      runtime.getAssistantStreamMode(sessionId, messageId) === "edit" &&
+      collectAssistantFileLinks(messageText).length > 0
+    ) {
+      beginEditReply(runtime, sessionId, messageId);
+      runtime.holdReplyDocuments(sessionId, messageId);
+    }
     const preparedStreamPayload = prepareAssistantStreamingPayload(
       runtime.stripDeliveredAssistantText(sessionId, messageId, messageText),
     );
@@ -332,6 +379,20 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
 
     beginEditReply(runtime, sessionId, messageId);
     enqueueAssistantReply(runtime, sessionId, messageId, preparedStreamPayload);
+  });
+
+  summaryAggregator.setOnAssistantStep((sessionId, step) => {
+    deps.assistantRunState.recordStep(sessionId, step);
+  });
+
+  summaryAggregator.setOnSessionBoundary((sessionId, messageId) => {
+    if (messageId) {
+      const mirrored = promptQueue.findByInboxId(messageId);
+      if (mirrored?.inbox?.delivery !== "queue") {
+        return;
+      }
+    }
+    deps.assistantRunState.sealRun(sessionId);
   });
 
   summaryAggregator.setOnComplete((sessionId, messageId, messageText, completionInfo) => {
@@ -398,7 +459,7 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
           assistantResponseMode === "edit" &&
           runtime.toolCallStreamer.hasUnsentMessages(sessionId)
         ) {
-          await runtime.letOutReplies(sessionId);
+          await runtime.letOutReplies(sessionId, false);
         }
 
         const remainingText = runtime.stripDeliveredAssistantText(
@@ -412,11 +473,39 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
           await runtime.compactProgressStreamer.flushPending(sessionId);
         }
 
+        const hasDocumentLinks =
+          config.bot.messageFormatMode === "markdown" &&
+          collectAssistantFileLinks(messageText).length > 0;
+        // A pending snapshot may itself wait on this reply's document gate.
+        if (!hasDocumentLinks) await runtime.todoSnapshots.flush(sessionId);
+
+        const prepared = await prepareAssistantDocuments(
+          remainingText,
+          getCurrentSession()?.id === sessionId ? getCurrentSession()?.directory : undefined,
+          () => policy.isForegroundSession(sessionId),
+          messageText,
+        );
+        prepared.documents = runtime.takeAssistantDocuments(
+          sessionId,
+          messageId,
+          prepared.documents,
+        );
         await finalizeAssistantResponse({
           sessionId,
           messageId,
           // Text sent early, above a question or permission prompt, is not sent again.
-          messageText: remainingText,
+          messageText: prepared.text,
+          strictFinalPayload: hasDocumentLinks,
+          afterTextAccepted: async () => {
+            try {
+              await deliverAssistantDocuments(prepared, destination.api, destination.chatId, {
+                disable_notification: true,
+              });
+            } finally {
+              runtime.releaseReplyDocuments(sessionId, messageId);
+            }
+            if (hasDocumentLinks) await runtime.todoSnapshots.flush(sessionId);
+          },
           responseStreamer: {
             complete: (completeSessionId, completeMessageId, payload, options) =>
               runtime.completeAssistantResponse(
@@ -435,7 +524,12 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
             ]).then(() => undefined);
           },
           prepareStreamingPayload: prepareAssistantFinalStreamingPayload,
-          renderFinalParts: (text) => renderAssistantFinalPartsSafe(text),
+          renderFinalParts: (text) =>
+            renderAssistantFinalPartsSafe(
+              text,
+              getCurrentSession()?.id === sessionId ? getCurrentSession()?.directory : undefined,
+              () => policy.isForegroundSession(sessionId),
+            ),
           getReplyKeyboard: () => getReplyKeyboard(deps),
           notifyFirstFinalPart: assistantResponseMode === "draft" && !getShowAssistantRunFooter(),
           sendRenderedPart: async (part, options) => {
@@ -456,6 +550,11 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
           runtime.compactProgressStreamer.releaseHold(sessionId);
         }
 
+        // The reply reached the chat live, so its session carries no unread mark for it.
+        if (completionInfo.completedAt !== undefined) {
+          markSessionReplyRead(sessionId, completionInfo.completedAt);
+        }
+
         await sendTtsResponseForSession({
           api: destination.api,
           sessionId,
@@ -472,6 +571,8 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
           chatId: destination.chatId,
         });
       } finally {
+        runtime.releaseReplyDocuments(sessionId, messageId);
+        runtime.clearAssistantDocuments(sessionId, messageId);
         await deps.scheduledTaskRuntime.flushDeferredDeliveries();
       }
     });
@@ -516,6 +617,8 @@ export function registerAssistantResponseHandlers(deps: AssistantResponseDeps): 
     if (!policy.getDestination(update.sessionId) || !policy.isForegroundSession(update.sessionId)) {
       return;
     }
+    await runtime.waitForReplyDocuments(update.sessionId, update.messageId);
+    if (!policy.isForegroundSession(update.sessionId)) return;
 
     logger.debug("[Bot] Agent thinking update", {
       sessionId: update.sessionId,

@@ -421,6 +421,66 @@ describe("attach/service", () => {
     expect(container.attachManager.getSnapshot()?.sessionId).toBe("session-1");
   });
 
+  it("joins a restore already in progress instead of restoring the session twice", async () => {
+    let releaseSubscription: () => void = () => {};
+    mocked.ensureEventSubscriptionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseSubscription = resolve;
+        }),
+    );
+
+    const restoreDeps = {
+      ...deps,
+      bot: createBot(),
+      chatId: 777,
+      ensureEventSubscription: mocked.ensureEventSubscriptionMock,
+    };
+
+    const first = restoreAttachedCurrentSession(restoreDeps);
+    await vi.waitFor(() => {
+      expect(mocked.ensureEventSubscriptionMock).toHaveBeenCalledTimes(1);
+    });
+    const second = restoreAttachedCurrentSession(restoreDeps);
+
+    releaseSubscription();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(firstResult).toBe(true);
+    expect(secondResult).toBe(true);
+    expect(mocked.ensureEventSubscriptionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries after joining a restore that failed", async () => {
+    let releaseHealth: () => void = () => {};
+    mocked.healthMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          releaseHealth = () => reject(new Error("fetch failed"));
+        }),
+    );
+
+    const restoreDeps = {
+      ...deps,
+      bot: createBot(),
+      chatId: 777,
+      ensureEventSubscription: mocked.ensureEventSubscriptionMock,
+    };
+
+    const first = restoreAttachedCurrentSession(restoreDeps);
+    await vi.waitFor(() => {
+      expect(mocked.healthMock).toHaveBeenCalledTimes(1);
+    });
+    const second = restoreAttachedCurrentSession(restoreDeps);
+
+    releaseHealth();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(firstResult).toBe(false);
+    expect(secondResult).toBe(true);
+    expect(mocked.ensureEventSubscriptionMock).toHaveBeenCalledTimes(1);
+  });
+
   it("reuses a saved pinned message after restart instead of recreating it", async () => {
     mocked.pinnedGetStateMock.mockReturnValueOnce({
       sessionId: null,
@@ -790,6 +850,15 @@ describe("attach/service", () => {
     expect(mocked.pinnedLoadContextFromHistoryMock).toHaveBeenCalledTimes(1);
     expect(mocked.sessionStatusMock).toHaveBeenCalledTimes(2);
     expect(mocked.questionListMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops the local goal even when already detached and rejects late results", () => {
+    const goal = { id: "goal-1", objective: "Fix tests", status: "active" as const, rounds: 0, maxRounds: 50, updatedAt: 1 };
+    container.goalManager.follow("session-1");
+    container.goalManager.apply("session-1", goal, false);
+    detachAttachedSession("already_detached", deps);
+    container.goalManager.apply("session-1", goal, false);
+    expect(container.goalManager.snapshot()).toEqual({ sessionId: null, goal: null });
   });
 
   it("detaches locally without stopping the directory event listener", async () => {

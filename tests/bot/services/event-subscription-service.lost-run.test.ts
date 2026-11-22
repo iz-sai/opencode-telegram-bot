@@ -1,6 +1,5 @@
-import os from "node:os";
-import path from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
+import { createTestHome } from "../../helpers/test-environment.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Context } from "grammy";
 import type { Event } from "@opencode-ai/sdk/v2";
@@ -182,7 +181,7 @@ describe("bot/services/event-subscription-service lost run", () => {
     vi.stubEnv("TELEGRAM_ALLOWED_USER_ID", "123456789");
     vi.stubEnv("OPENCODE_MODEL_PROVIDER", "test-provider");
     vi.stubEnv("OPENCODE_MODEL_ID", "test-model");
-    vi.stubEnv("OPENCODE_TELEGRAM_HOME", await mkdtemp(path.join(os.tmpdir(), "lost-run-")));
+    vi.stubEnv("OPENCODE_TELEGRAM_HOME", await createTestHome("lost-run-"));
     tempHome = process.env.OPENCODE_TELEGRAM_HOME!;
     setRuntimeMode("installed");
 
@@ -229,10 +228,10 @@ describe("bot/services/event-subscription-service lost run", () => {
 
   afterEach(async () => {
     vi.useRealTimers();
-    await new Promise((resolve) => setTimeout(resolve, 20));
     service?.cleanup("test_cleanup");
     service = null;
     const settingsStore = await import("../../../src/app/stores/settings-store.js");
+    await settingsStore.flushSettings();
     settingsStore.__resetSettingsForTests();
     vi.unstubAllEnvs();
     await rm(tempHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
@@ -267,6 +266,47 @@ describe("bot/services/event-subscription-service lost run", () => {
     });
     await settle();
     await ending;
+
+    const last = collectSentTexts(api).filter((text) => text.includes("npm test")).at(-1) ?? "";
+    expect(last).not.toContain("⏳");
+  });
+
+  it("releases the ending hold when the ending throws", async () => {
+    const aggregator = container.summaryAggregator;
+    const interruptSpy = vi.spyOn(aggregator, "interruptSubagents").mockImplementation(() => {
+      throw new Error("interrupt failed");
+    });
+
+    try {
+      const ending = service!.endRunLostWithServer("opencode_stop");
+
+      await expect(ending).rejects.toThrow("interrupt failed");
+      await expect(aggregator.whenOutboundIdle()).resolves.toBeUndefined();
+    } finally {
+      interruptSpy.mockRestore();
+    }
+  });
+
+  it("stays pending when a newer hold takes over the ending queue", async () => {
+    emitTool(container, "bash", "running", "call-bash", { command: "npm test" });
+    await settle();
+
+    const aggregator = container.summaryAggregator;
+    const ending = service!.endRunLostWithServer("opencode_stop");
+    const newerGeneration = aggregator.holdOutbound();
+
+    let settled = false;
+    void ending.then(() => {
+      settled = true;
+    });
+    await settle();
+    expect(settled).toBe(false);
+
+    const draining = aggregator.drainOutbound(0, newerGeneration);
+    await settle();
+    await draining;
+    await ending;
+    expect(settled).toBe(true);
 
     const last = collectSentTexts(api).filter((text) => text.includes("npm test")).at(-1) ?? "";
     expect(last).not.toContain("⏳");

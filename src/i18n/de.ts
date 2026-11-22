@@ -1,13 +1,25 @@
-import type { I18nDictionary } from "./en.js";
+import { projectSearchFallback, type I18nDictionary } from "./en.js";
 
 export const de: I18nDictionary = {
   "cmd.description.switch": "Sitzung suchen und wechseln (OpenCode / ChatGPT / Claude)",
   "cmd.description.messages_all": "Vollständigen Sitzungsverlauf anzeigen",
+  "assistant.image.unavailable": "Bild nicht verfügbar: {name}",
+  "assistant.image.unsupported": "Nicht unterstütztes Bildformat: {name}",
+  "assistant.image.too_large": "Bild überschreitet die Telegram-Fotolimits: {name}",
+  ...projectSearchFallback,
+  "projects.search.prompt": "🔍 Gib den Projektnamen ein:",
+  "projects.search.results": "Suchergebnisse für \"{query}\":",
+  "projects.search.no_results": "Keine Projekte für \"{query}\" gefunden",
+  "sessions.search.prompt": "🔍 Gib den Sitzungstitel oder die ID ein:",
+  "sessions.search.results": "Suchergebnisse für \"{query}\":",
+  "sessions.search.results_page": "Suchergebnisse für \"{query}\" (Seite {page}):",
+  "sessions.search.no_results": "Keine Sitzungen für \"{query}\" gefunden",
   "cmd.description.recent": "Letzte Sitzungen aller Projekte",
   "recent.heading": "Letzte Sitzungen aller Projekte (mit /recent aktualisieren):",
   "recent.empty": "📭 Keine Sitzungen in den Projekten gefunden.",
   "recent.running": "läuft",
   "recent.idle": "inaktiv",
+  "recent.status.unread": "ungelesene Antwort",
   "recent.question": "wartet auf Antwort",
   "recent.permission": "wartet auf Berechtigung",
   "cmd.description.status": "Server- und Sitzungsstatus",
@@ -26,7 +38,7 @@ export const de: I18nDictionary = {
   "cmd.description.mcps": "MCP servers",
   "cmd.description.opencode_start": "OpenCode-Server starten",
   "cmd.description.opencode_stop": "OpenCode-Server stoppen",
-  "cmd.description.reload": "Reload OpenCode configuration",
+  "cmd.description.reload": "OpenCode-Konfiguration neu laden",
   "cmd.description.ls": "Verzeichnisinhalt auflisten",
   "cmd.description.help": "Hilfe",
 
@@ -77,14 +89,17 @@ export const de: I18nDictionary = {
   "bot.thinking": "💭 Denke...",
   "progress.compact.activity": "{header}\n{activity}",
   "progress.compact.working_header": "⏳ Arbeite",
-  "progress.compact.finished_header": "✅ Arbeit abgeschlossen",
   "progress.compact.thinking": "💭 Denke...",
   "progress.compact.responding": "✍️ Schreibe Antwort...",
   "progress.compact.waiting_question": "❓ Warte auf deine Antwort...",
   "progress.compact.waiting_permission": "🔐 Warte auf Berechtigung...",
   "progress.compact.retrying": "🔁 Wiederhole...",
   "progress.compact.task": "🤖 Aufgabe läuft",
-  "progress.compact.done": "{header}\nTool-Aufrufe: {tools} · geänderte Dateien: {files}",
+  "progress.compact.count.commands": "Befehle: {count}",
+  "progress.compact.count.edits": "Bearbeitungen: {count}",
+  "progress.compact.count.reads": "Lesevorgänge: {count}",
+  "progress.compact.count.tools": "Tools: {count}",
+  "progress.compact.count.changed_files": "geänderte Dateien: {count}",
   "bot.project_not_selected":
     "🏗 Projekt ist nicht ausgewählt.\n\nWähle zuerst ein Projekt mit /projects.",
   "bot.creating_session": "🔄 Erstelle eine neue Sitzung...",
@@ -97,20 +112,19 @@ export const de: I18nDictionary = {
     "⚠️ Die aktive Sitzung passt nicht zum ausgewählten Projekt und wurde daher zurückgesetzt. Nutze /sessions zur Auswahl oder /new, um eine neue Sitzung zu erstellen.",
   "bot.prompt_send_error": "Anfrage konnte nicht an OpenCode gesendet werden.",
   "bot.project_folder_missing":
-    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+    "🚫 Der Projektordner existiert nicht mehr: {path}. Wähle ein anderes Projekt mit /projects.",
   "bot.project_folder_missing_worktree":
-    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
+    "🚫 Der Projektordner existiert nicht mehr: {path}. Wähle einen anderen Worktree mit /worktree.",
   "bot.session_error": "🔴 OpenCode meldete einen Fehler: {message}",
   "bot.assistant_reply_undelivered":
-    "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
+    "⚠️ Die letzte Antwort des Assistenten konnte nicht zugestellt werden. Sende deine Nachricht erneut, wenn du die Antwort noch benötigst.",
   "bot.stale_messages_skipped":
-    "⚠️ Some messages were skipped while Telegram was unreachable. Please send them again.",
+    "⚠️ Einige Nachrichten wurden übersprungen, während Telegram nicht erreichbar war. Bitte sende sie erneut.",
   "bot.session_retry":
     "🔁 {message}\n\nDer Provider liefert bei wiederholten Versuchen immer wieder denselben Fehler. Mit /abort abbrechen.",
   "bot.external_user_input": "Externe Benutzereingabe",
   "background.session_fallback": "Sitzung {id}",
-  "background.assistant_response":
-    "🔔 Assistent hat in einer Hintergrundsitzung geantwortet: {session}",
+  "background.assistant_response": "🔔 Antwort aus einer anderen Sitzung:\n[{project}] {session}",
   "background.question_asked": "❓ Hintergrundsitzung benötigt eine Antwort: {session}",
   "background.permission_asked": "🔐 Hintergrundsitzung hat Berechtigungen angefordert: {session}",
   "background.open_session_button": "Sitzung öffnen",
@@ -127,8 +141,8 @@ export const de: I18nDictionary = {
   "bot.files_downloading": "⏳ Lade Dateien herunter...",
   "bot.file_too_large": "⚠️ Datei ist zu groß (max. {maxSizeMb}MB)",
   "bot.file_download_error": "🔴 Datei konnte nicht heruntergeladen werden",
-  "bot.file_type_unsupported":
-    "⚠️ Dieser Dateityp wird nicht unterstützt. Sende ein Bild, Dokument (PDF, DOCX, PPTX) oder eine Text-/Code-Datei.",
+  "bot.file_save_error":
+    "🔴 Datei konnte nicht lokal gespeichert werden, der Agent kann sie nicht lesen.",
   "bot.rich_message_media_skipped":
     "⚠️ {count} nicht unterstützte Medienteile wurden übersprungen.",
   "bot.message_type_unsupported": "⚠️ Dieser Nachrichtentyp wird nicht unterstützt.",
@@ -136,7 +150,6 @@ export const de: I18nDictionary = {
     "⚠️ Eine oder mehrere Dateien in diesem Album können nicht verarbeitet werden. Es wurde nichts an OpenCode gesendet.",
   "bot.media_group_download_error":
     "🔴 Eine der Dateien konnte nicht heruntergeladen werden. Es wurde nichts an OpenCode gesendet.",
-  "bot.model_no_pdf": "⚠️ Das aktuelle Modell unterstützt keine PDF-Eingabe. Sende nur Text.",
   "bot.document_extraction_error": "🔴 Dokumenttext konnte nicht extrahiert werden.",
   "bot.text_file_too_large": "⚠️ Textdatei ist zu groß (max. {maxSizeKb}KB)",
 
@@ -184,7 +197,9 @@ export const de: I18nDictionary = {
   "settings.response_streaming.draft": "draft (experimental)",
   "settings.diff_files.label": "Diff-Dateien",
   "settings.assistant_footer.label": "Antwort-Footer",
-  "settings.pin_session_dashboard.label": "Pin session dashboard",
+  "assistant.footer.interrupted": "interrupted",
+  "settings.pin_session_dashboard.label": "Sitzungsdashboard anheften",
+  "settings.background_notifications.label": "Benachrichtigungen aus anderen Sitzungen",
   "settings.tts.label": "Audioantworten",
   "settings.prompt_queue.label": "Nachrichtenwarteschlange",
   "settings.value.on": "Ein",
@@ -272,7 +287,7 @@ export const de: I18nDictionary = {
     "🏗 Projekt ist nicht ausgewählt.\n\nWähle zuerst ein Projekt mit /projects.",
   "detach.no_active_session": "ℹ️ Der Bot ist bereits von allen Sitzungen getrennt.",
   "detach.success":
-    "✅ Von Sitzung getrennt: {title}\n\nDie OpenCode-Sitzung wurde nicht gestoppt. Falls sie noch läuft, läuft sie separat weiter. Um sie später zu prüfen, wähle sie erneut über /sessions aus.",
+    "✅ Von Sitzung getrennt: {title}\n\nDie OpenCode-Sitzung wurde nicht gestoppt. Falls sie noch läuft, läuft sie separat weiter. Um sie später zu prüfen, wähle sie erneut über /recent aus.",
   "detach.error": "🔴 Trennen von der aktuellen Sitzung fehlgeschlagen.",
 
   "new.project_not_selected":
@@ -291,6 +306,8 @@ export const de: I18nDictionary = {
     "⚠️ Event-Stream gestoppt, aber der Agent konnte bereits fertig sein.",
   "stop.success":
     "✅ Agent-Aktion unterbrochen. Von diesem Lauf werden keine weiteren Nachrichten gesendet.",
+  "stop.success_background_running":
+    "✅ Aktion des Agenten unterbrochen.\nHintergrundoperationen laufen weiter: {count}\nIhr Fortschritt und ihre Ergebnisse werden weiterhin hier angezeigt.",
   "stop.warn_still_busy":
     "⚠️ Signal gesendet, aber der Agent ist noch beschäftigt.\n\nDer Event-Stream ist bereits deaktiviert, daher werden keine Zwischenmeldungen gesendet.",
   "stop.warn_timeout":
@@ -305,11 +322,12 @@ export const de: I18nDictionary = {
   "opencode_start.already_running_external":
     "✅ OpenCode-Server läuft bereits als externer Prozess\n\nVersion: {version}\n\nDieser Server wurde nicht vom Bot gestartet, daher kann /opencode-stop ihn nicht stoppen.",
   "opencode_start.already_running": "✅ OpenCode-Server läuft bereits\n\nVersion: {version}",
+  "opencode_start.connected": "✅ Mit einem laufenden OpenCode-Server verbunden\n{url} · v{version}",
   "opencode_start.remote_configured":
     "⚠️ /opencode_start funktioniert nur mit einem lokalen OpenCode-Server.",
   "opencode_start.starting": "🔄 Starte OpenCode-Server...",
   "opencode_start.start_error":
-    "🔴 OpenCode-Server konnte nicht gestartet werden\n\nFehler: {error}\n\nPrüfe, ob OpenCode CLI installiert und im PATH verfügbar ist:\nopencode --version\nnpm install -g @opencode-ai/cli",
+    "🔴 OpenCode-Server konnte nicht gestartet werden\n\nFehler: {error}\n\nPrüfe, ob OpenCode CLI installiert und im PATH oder in einem Standard-Installationsverzeichnis verfügbar ist (OPENCODE_BIN_PATH kann auf eine eigene Datei zeigen):\nopencode --version\nnpm install -g @opencode-ai/cli",
   "opencode_start.started_not_ready":
     "⚠️ OpenCode-Server gestartet, aber reagiert nicht\n\nPID: {pid}\n\nDer Server startet möglicherweise noch. Versuche /status in ein paar Sekunden.",
   "opencode_start.success":
@@ -329,10 +347,10 @@ export const de: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode-Server erfolgreich gestoppt",
   "opencode_stop.error":
     "🔴 Beim Stoppen des Servers ist ein Fehler aufgetreten.\n\nSiehe Anwendungslogs für Details.",
-  "reload.reloading": "🔄 Reloading OpenCode configuration...",
-  "reload.success": "✅ OpenCode configuration reloaded",
-  "reload.failed": "🔴 Failed to reload OpenCode configuration",
-  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
+  "reload.reloading": "🔄 OpenCode-Konfiguration wird neu geladen...",
+  "reload.success": "✅ OpenCode-Konfiguration neu geladen",
+  "reload.failed": "🔴 OpenCode-Konfiguration konnte nicht neu geladen werden",
+  "reload.failed_with_error": "🔴 OpenCode-Konfiguration konnte nicht neu geladen werden\n\nFehler: {error}",
 
   "agent.changed_message": "✅ Agent geändert zu: {name}",
   "agent.change_error_callback": "Agent konnte nicht geändert werden",
@@ -385,7 +403,7 @@ export const de: I18nDictionary = {
   "context.button.close": "❌ Close",
   "context.details.title": "📊 Context details",
   "context.details.window": "Window: {used} / {limit} ({percent}%)",
-  "context.details.token_breakdown": "Token breakdown of the latest assistant message:",
+  "context.details.token_breakdown": "Token-Aufschlüsselung der letzten Nachricht des Assistenten:",
   "context.details.input": "Input: {count}",
   "context.details.output": "Output: {count}",
   "context.details.reasoning": "Reasoning: {count}",
@@ -421,7 +439,7 @@ export const de: I18nDictionary = {
   "permission.outcome.outside_suffix": " · answered outside Telegram",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
   "permission.outcome.not_answered": "⏹ Not answered",
-  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
+  "permission.delivery_failed": "⚠️ Die Antwort hat OpenCode nicht erreicht — tippe erneut",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Bearbeiten",
   "permission.name.write": "Schreiben",
@@ -468,7 +486,7 @@ export const de: I18nDictionary = {
     "⚠️ Die Warteschlange ist voll ({max}). Entferne eine Nachricht oder warte, bis die aktuelle Aufgabe abgeschlossen ist.",
   "queue.removed": "🗑 Nachricht aus der Warteschlange entfernt.",
   "queue.not_found": "Diese Nachricht ist nicht mehr in der Warteschlange.",
-  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
+  "queue.steer_added": "📥 Zur aktuellen Aufgabe hinzugefügt ({count}/{max}).",
   "queue.disabled_hint": "Die Nachrichtenwarteschlange lässt sich in /settings aktivieren.",
   "keyboard.updated": "⌨️ Tastatur aktualisiert",
 
@@ -526,14 +544,14 @@ export const de: I18nDictionary = {
   "runtime.wizard.ask_server_password":
     "OpenCode-Server-Passwort eingeben (optional).\nEnter drücken, um es leer zu lassen.\n> ",
   "runtime.wizard.ask_server_version":
-    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
-  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+    "Wähle die OpenCode-Serverversion:\n1 - OpenCode V1 (1.x, npm-Paket opencode-ai)\n2 - OpenCode V2 (2.x, npm-Paket @opencode/cli)\nDrücke Enter für den Standardwert: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Gib 1 oder 2 ein oder drücke Enter für den Standardwert.\n",
   "runtime.wizard.ask_server_password_required":
-    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+    "Gib das Passwort des OpenCode V2-Servers ein (erforderlich).\nAnzeigen mit: opencode service get password\n> ",
   "runtime.wizard.server_password_required":
-    "The password is required for OpenCode V2. Please try again.\n",
+    "Für OpenCode V2 ist ein Passwort erforderlich. Bitte versuche es erneut.\n",
   "runtime.wizard.ask_server_password_keep":
-    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
+    "Gib das Passwort des OpenCode-Servers ein.\nDrücke Enter, um das gespeicherte Passwort beizubehalten.\n> ",
   "runtime.wizard.api_url_invalid":
     "Gib eine gültige URL (http/https) ein oder drücke Enter für Standard.\n",
   "runtime.wizard.start": "OpenCode Telegram Bot Einrichtung.\n",
@@ -590,7 +608,7 @@ export const de: I18nDictionary = {
   "task.kind.once": "einmalig",
   "task.run.success": "⏰ Geplante Aufgabe abgeschlossen: {description}",
   "task.run.error": "🔴 Geplante Aufgabe fehlgeschlagen: {description}\n\nFehler: {error}",
-  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
+  "task.run.error.folder_missing": "Der Projektordner existiert nicht mehr: {path}",
   "task.run.error.interactive_question":
     "Die geplante Aufgabe hat eine interaktive Frage gestellt und kann unbeaufsichtigt nicht fortfahren.",
   "task.run.error.interactive_permission":
@@ -598,6 +616,13 @@ export const de: I18nDictionary = {
 
   "tasklist.empty": "📭 Noch keine geplanten Aufgaben.",
   "tasklist.select": "Wähle eine geplante Aufgabe:",
+  "task.scheduling": "Scheduling",
+  "task.enabled": "On",
+  "task.disabled": "Off",
+  "task.button.enable": "Enable",
+  "task.button.disable": "Disable",
+  "task.toggle.saved": "Saved",
+  "task.toggle.error": "Speichern fehlgeschlagen",
   "tasklist.details":
     "⏰ Geplante Aufgabe\n\nAufgabe: {prompt}\nProjekt: {project}\nZeitplan: {schedule}\n{cronLine}Zeitzone: {timezone}\nNächster Lauf: {nextRunAt}\nLetzter Lauf: {lastRunAt}\nAnzahl Läufe: {runCount}",
   "tasklist.details.cron": "Cron: {cron}",
@@ -608,6 +633,13 @@ export const de: I18nDictionary = {
   "tasklist.load_error": "🔴 Geplante Aufgaben konnten nicht geladen werden.",
 
   "commands.select": "Wähle einen OpenCode-Befehl:",
+  "commands.search.button": "🔍 Suchen",
+  "commands.search.prompt": "🔍 Gib den Namen oder die Beschreibung des Befehls ein:",
+  "commands.search.results": "Suchergebnisse für „{query}“:",
+  "commands.search.results_page": "Suchergebnisse für „{query}“ (Seite {page}):",
+  "commands.search.no_results": "Keine Befehle für „{query}“ gefunden",
+  "commands.search.again": "↩ Erneut suchen",
+  "commands.search.cancel": "❌ Abbrechen",
   "commands.empty": "📭 Für dieses Projekt sind keine OpenCode-Befehle verfügbar.",
   "commands.fetch_error": "🔴 OpenCode-Befehle konnten nicht geladen werden.",
   "commands.no_description": "Keine Beschreibung",
@@ -631,12 +663,21 @@ export const de: I18nDictionary = {
   "commands.download.downloading": "Datei wird heruntergeladen...",
   "commands.download.not_found": "Datei nicht gefunden",
   "commands.download.not_file": "Pfad ist keine Datei",
-  "commands.download.file_too_large": "Datei ist zu groß",
+  "assistant.file.unavailable": "Datei nicht verfügbar: {name}",
+  "assistant.file.too_large": "Datei überschreitet das Limit von {maxSizeMb} MiB: {name}",
+  "commands.download.file_too_large": "Datei ist zu groß: {size} (Maximum: {maxSizeMb} MiB)",
   "commands.download.size": "Größe",
   "commands.download.modified": "Geändert",
   "commands.download.error": "Datei konnte nicht heruntergeladen werden.",
 
   "skills.select": "Wähle einen OpenCode-Skill:",
+  "skills.search.button": "🔍 Suchen",
+  "skills.search.prompt": "🔍 Gib den Namen oder die Beschreibung des Skills ein:",
+  "skills.search.results": "Suchergebnisse für „{query}“:",
+  "skills.search.results_page": "Suchergebnisse für „{query}“ (Seite {page}):",
+  "skills.search.no_results": "Keine Skills für „{query}“ gefunden",
+  "skills.search.again": "↩ Erneut suchen",
+  "skills.search.cancel": "❌ Abbrechen",
   "skills.empty": "📭 Für dieses Projekt sind keine OpenCode-Skills verfügbar.",
   "skills.fetch_error": "🔴 OpenCode-Skills konnten nicht geladen werden.",
   "skills.no_description": "Keine Beschreibung",
@@ -657,9 +698,9 @@ export const de: I18nDictionary = {
     "Diese Seite konnte nicht geladen werden. Bitte versuche es erneut.",
 
   "mcps.select": "MCP servers:",
-  "mcps.empty": "📭 No MCP servers configured.",
-  "mcps.fetch_error": "🔴 Failed to load MCP servers.",
-  "mcps.toggle_error": "🔴 Failed to toggle MCP server.",
+  "mcps.empty": "📭 Keine MCP-Server konfiguriert.",
+  "mcps.fetch_error": "🔴 MCP-Server konnten nicht geladen werden.",
+  "mcps.toggle_error": "🔴 Status des MCP-Servers konnte nicht geändert werden.",
   "mcps.enabling": "Enabling...",
   "mcps.disabling": "Disabling...",
   "mcps.status.connected": "🟢 Connected",
@@ -673,7 +714,7 @@ export const de: I18nDictionary = {
   "mcps.button.enable": "🟢 Enable",
   "mcps.button.disable": "🔴 Disable",
   "mcps.button.back": "⬅️ Back",
-  "mcps.auth_required": "This server requires authorization and cannot be enabled from the bot.",
+  "mcps.auth_required": "Dieser Server erfordert eine Autorisierung und kann nicht über den Bot aktiviert werden.",
 
   "cmd.description.rename": "Aktuelle Sitzung umbenennen",
 
@@ -736,7 +777,58 @@ export const de: I18nDictionary = {
   "attachment.cancelled": "❌ Anhang entfernt",
   "attachment.invalid":
     "⚠️ Die angehängte Datei ist nicht mehr verfügbar. Die Nachricht wird ohne sie gesendet.",
-  "local_command.empty_output": "The command produced no output.",
-  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
-  "local_command.timeout": "The command timed out.",
+  "local_command.empty_output": "Der Befehl hat keine Ausgabe erzeugt.",
+  "local_command.failed": "Befehl mit Exit-Code {exitCode} fehlgeschlagen: {stderr}",
+  "local_command.timeout": "Zeitüberschreitung beim Befehl.",
+
+  "cmd.description.goal": "Ein selbstständig fortgeführtes Sitzungsziel festlegen",
+  "pinned.line.goal": "◎ Goal: {status} — {objective}",
+  "goal.none": "Kein Ziel festgelegt.\n\nNutze /goal und sende dann das Ziel in der nächsten Nachricht.",
+  "goal.arguments_not_supported": "Nutze /goal ohne Argumente und folge dann den Anweisungen oder verwende die Ziel-Schaltflächen.",
+  "goal.input.prompt": "Sende das Ziel dieser Sitzung in deiner nächsten Textnachricht. Beschreibe das zu erreichende Ergebnis.",
+  "goal.input.empty": "Das Ziel darf nicht leer sein. Sende den Zieltext oder tippe auf Cancel.",
+  "goal.input.reserved": "Dieses Wort ist in OpenCode für die Zielsteuerung reserviert. Beschreibe das Ziel genauer oder tippe auf Cancel.",
+  "goal.button.details": "◎ {status} · {objective}",
+  "goal.button.pause": "⏸ Pause",
+  "goal.button.resume": "▶ Continue",
+  "goal.button.clear": "× Delete",
+  "goal.start": "✅ Start",
+  "goal.continue": "▶ Continue",
+  "goal.delete": "🗑 Delete goal",
+  "goal.deleted": "Ziel gelöscht. Nutze /goal, um ein neues zu erstellen.",
+  "goal.unsupported": "Dieser OpenCode-Server unterstützt keine Sitzungsziele.",
+  "goal.read_error": "Das Sitzungsziel konnte nicht gelesen werden.",
+  "goal.action_error": "Das Sitzungsziel konnte nicht aktualisiert werden.",
+  "goal.too_long": "Ein Ziel ist auf {limit} Zeichen begrenzt (erhalten: {count}).",
+  "goal.status.active": "active",
+  "goal.status.paused": "paused",
+  "goal.status.complete": "complete",
+  "goal.status.rounds": "{rounds}/{maxRounds}",
+  "goal.status.updated": "Updated {time}",
+  "goal.confirm.warning": "Dieses Ziel wird nach jedem Schritt selbstständig weiterverfolgt. Fortsetzung und Bewertung verbrauchen Tokens. Es gibt keine Kostenobergrenze. Der Server stoppt es nach Erreichen des Rundenlimits.",
+  "goal.confirm.round_limit": "Round limit: {rounds}.",
+  "goal.confirm.start": "Dieses Ziel starten?\n\n{objective}",
+  "goal.confirm.resume": "Dieses Ziel fortsetzen?\n\n{objective}",
+  "goal.confirm.confirm": "Confirm",
+  "goal.confirm.cancel": "❌ Cancel",
+  "goal.notice.paused": "◎ Goal {status}\n{reason}",
+  "goal.notice.complete": "◎ Goal {status}\n{reason}",
+  "goal.notice.no_reason": "Kein Grund angegeben.",
+  "goal.abort.paused": "Ziel pausiert: {reason}",
+  "goal.abort.failed": "Ziel konnte nicht pausiert werden: {reason}",
+  "goal.reason.paused_by_user": "Paused by the user",
+  "goal.reason.stopped_by_user": "Stopped by the user",
+  "goal.reason.server_restarted": "Der Server wurde neu gestartet, während das Ziel aktiv war",
+  "goal.reason.stopped_after_error": "Das Ziel wurde nach einem Fehler gestoppt",
+  "goal.reason.no_verdict": "Die Zielprüfung lieferte kein verwertbares Urteil",
+  "goal.reason.review_too_large": "Die Anfrage der Zielprüfung ist zu groß für das Modell",
+  "goal.reason.round_limit": "Das Limit von {rounds} Runden wurde erreicht",
+  "goal.reason.wait_limit": "{minutes} Minuten lang wurde nichts ausgeführt, während das Ziel auf Hintergrundarbeit wartete",
+  "goal.reason.not_progress": "Kein Fortschritt: {reason}",
+  "goal.reason.session_failed": "Die Sitzung ist fehlgeschlagen: {reason}",
+  "goal.reason.no_active": "Kein aktives Ziel zum Pausieren.",
+  "goal.reason.no_paused": "Kein pausiertes Ziel zum Fortsetzen.",
+  "goal.reason.none_set": "Kein Ziel festgelegt.",
+  "goal.reason.objective_limit": "Ein Zieltext ist auf {limit} Zeichen begrenzt (erhalten: {count}).",
+
 };

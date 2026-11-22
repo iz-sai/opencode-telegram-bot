@@ -1,4 +1,4 @@
-import type { I18nDictionary } from "./en.js";
+import { projectSearchFallback, type I18nDictionary } from "./en.js";
 
 /**
  * Korean localization for OpenCode Telegram Bot.
@@ -10,11 +10,23 @@ import type { I18nDictionary } from "./en.js";
 export const ko: I18nDictionary = {
   "cmd.description.switch": "세션 검색 및 전환 (OpenCode / ChatGPT / Claude)",
   "cmd.description.messages_all": "전체 세션 기록 내보내기 및 보기",
+  "assistant.image.unavailable": "이미지를 사용할 수 없습니다: {name}",
+  "assistant.image.unsupported": "지원되지 않는 이미지 형식: {name}",
+  "assistant.image.too_large": "이미지가 Telegram 사진 제한을 초과합니다: {name}",
+  ...projectSearchFallback,
+  "projects.search.prompt": "🔍 프로젝트 이름을 입력하세요:",
+  "projects.search.results": "\"{query}\" 검색 결과:",
+  "projects.search.no_results": "\"{query}\"에 해당하는 프로젝트가 없습니다",
+  "sessions.search.prompt": "🔍 세션 제목 또는 ID를 입력하세요:",
+  "sessions.search.results": "\"{query}\" 검색 결과:",
+  "sessions.search.results_page": "\"{query}\" 검색 결과 ({page}페이지):",
+  "sessions.search.no_results": "\"{query}\"에 해당하는 세션이 없습니다",
   "cmd.description.recent": "모든 프로젝트의 최근 세션",
   "recent.heading": "모든 프로젝트의 최근 세션 (/recent로 새로고침):",
   "recent.empty": "📭 프로젝트에 세션이 없습니다.",
   "recent.running": "실행 중",
   "recent.idle": "대기 중",
+  "recent.status.unread": "읽지 않은 답변",
   "recent.question": "답변 대기 중",
   "recent.permission": "권한 승인 대기 중",
   "cmd.description.status": "서버 및 세션 상태",
@@ -33,7 +45,7 @@ export const ko: I18nDictionary = {
   "cmd.description.mcps": "MCP 서버",
   "cmd.description.opencode_start": "OpenCode 서버 시작",
   "cmd.description.opencode_stop": "OpenCode 서버 중지",
-  "cmd.description.reload": "Reload OpenCode configuration",
+  "cmd.description.reload": "OpenCode 설정 다시 불러오기",
   "cmd.description.ls": "디렉터리 내용 보기",
   "cmd.description.help": "도움말",
 
@@ -83,14 +95,17 @@ export const ko: I18nDictionary = {
   "bot.thinking": "💭 생각하는 중...",
   "progress.compact.activity": "{header}\n{activity}",
   "progress.compact.working_header": "⏳ 작업 중",
-  "progress.compact.finished_header": "✅ 작업 완료",
   "progress.compact.thinking": "💭 생각하는 중...",
   "progress.compact.responding": "✍️ 답변 작성 중...",
   "progress.compact.waiting_question": "❓ 답변을 기다리는 중...",
   "progress.compact.waiting_permission": "🔐 권한 승인을 기다리는 중...",
   "progress.compact.retrying": "🔁 다시 시도하는 중...",
   "progress.compact.task": "🤖 작업 실행 중",
-  "progress.compact.done": "{header}\n도구 호출: {tools} · 변경된 파일: {files}",
+  "progress.compact.count.commands": "명령: {count}",
+  "progress.compact.count.edits": "편집: {count}",
+  "progress.compact.count.reads": "읽기: {count}",
+  "progress.compact.count.tools": "도구: {count}",
+  "progress.compact.count.changed_files": "변경된 파일: {count}",
   "bot.project_not_selected":
     "🏗 프로젝트가 선택되지 않았습니다.\n\n먼저 /projects로 프로젝트를 선택해 주세요.",
   "bot.creating_session": "🔄 새 세션을 만드는 중...",
@@ -103,19 +118,19 @@ export const ko: I18nDictionary = {
     "⚠️ 활성 세션이 선택한 프로젝트와 일치하지 않아 초기화되었습니다. /sessions에서 세션을 선택하거나 /new로 새 세션을 만들어 주세요.",
   "bot.prompt_send_error": "OpenCode에 요청을 보내지 못했습니다.",
   "bot.project_folder_missing":
-    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+    "🚫 프로젝트 폴더가 더 이상 존재하지 않습니다: {path}. /projects에서 다른 프로젝트를 선택하세요.",
   "bot.project_folder_missing_worktree":
-    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
+    "🚫 프로젝트 폴더가 더 이상 존재하지 않습니다: {path}. /worktree에서 다른 worktree를 선택하세요.",
   "bot.session_error": "🔴 OpenCode 오류가 발생했습니다: {message}",
   "bot.assistant_reply_undelivered":
-    "⚠️ The last assistant reply could not be delivered. Send your message again if you still need it.",
+    "⚠️ 마지막 어시스턴트 답변을 전달하지 못했습니다. 답변이 여전히 필요하면 메시지를 다시 보내주세요.",
   "bot.stale_messages_skipped":
-    "⚠️ Some messages were skipped while Telegram was unreachable. Please send them again.",
+    "⚠️ Telegram에 연결할 수 없는 동안 일부 메시지를 건너뛰었습니다. 다시 보내주세요.",
   "bot.session_retry":
     "🔁 {message}\n\n재시도할 때마다 동일한 오류가 반복됩니다. /abort로 중단하세요.",
   "bot.external_user_input": "외부 사용자 입력",
   "background.session_fallback": "세션 {id}",
-  "background.assistant_response": "🔔 백그라운드 세션에서 답변이 도착했습니다: {session}",
+  "background.assistant_response": "🔔 다른 세션의 답변:\n[{project}] {session}",
   "background.question_asked": "❓ 백그라운드 세션에서 답변이 필요합니다: {session}",
   "background.permission_asked": "🔐 백그라운드 세션에서 권한을 요청했습니다: {session}",
   "background.open_session_button": "세션 열기",
@@ -129,15 +144,13 @@ export const ko: I18nDictionary = {
   "bot.files_downloading": "⏳ 파일들을 다운로드하는 중...",
   "bot.file_too_large": "⚠️ 파일이 너무 큽니다 (최대 {maxSizeMb}MB)",
   "bot.file_download_error": "🔴 파일 다운로드에 실패했습니다",
-  "bot.file_type_unsupported":
-    "⚠️ 지원되지 않는 파일 형식입니다. 이미지, 문서(PDF, DOCX, PPTX) 또는 텍스트/코드 파일을 보내 주세요.",
+  "bot.file_save_error": "🔴 파일을 로컬에 저장하지 못했습니다. 에이전트가 파일을 읽을 수 없습니다.",
   "bot.rich_message_media_skipped": "⚠️ 지원되지 않는 미디어 {count}개를 건너뛰었습니다.",
   "bot.message_type_unsupported": "⚠️ 지원되지 않는 메시지 형식입니다.",
   "bot.media_group_not_processed":
     "⚠️ 이 앨범의 일부 파일은 처리할 수 없습니다. OpenCode에 아무것도 전송되지 않았습니다.",
   "bot.media_group_download_error":
     "🔴 파일 중 하나를 다운로드하지 못했습니다. OpenCode에 아무것도 전송되지 않았습니다.",
-  "bot.model_no_pdf": "⚠️ 현재 모델은 PDF 입력을 지원하지 않습니다. 텍스트만 전송합니다.",
   "bot.document_extraction_error": "🔴 문서 텍스트 추출에 실패했습니다.",
   "bot.text_file_too_large": "⚠️ 텍스트 파일이 너무 큽니다 (최대 {maxSizeKb}KB)",
 
@@ -184,7 +197,9 @@ export const ko: I18nDictionary = {
   "settings.response_streaming.draft": "초안 (실험적)",
   "settings.diff_files.label": "Diff 파일",
   "settings.assistant_footer.label": "어시스턴트 푸터",
-  "settings.pin_session_dashboard.label": "Pin session dashboard",
+  "assistant.footer.interrupted": "interrupted",
+  "settings.pin_session_dashboard.label": "세션 대시보드 고정",
+  "settings.background_notifications.label": "다른 세션의 알림",
   "settings.tts.label": "음성 답변",
   "settings.prompt_queue.label": "메시지 대기열",
   "settings.value.on": "켜기",
@@ -269,7 +284,7 @@ export const ko: I18nDictionary = {
     "🏗 프로젝트가 선택되지 않았습니다.\n\n먼저 /projects로 프로젝트를 선택해 주세요.",
   "detach.no_active_session": "ℹ️ 봇은 이미 어떤 세션에도 연결되어 있지 않습니다.",
   "detach.success":
-    "✅ 세션에서 분리됨: {title}\n\nOpenCode 세션은 중지되지 않았습니다. 아직 실행 중이라면 별도로 계속 진행됩니다. 나중에 확인하려면 /sessions에서 다시 선택하세요.",
+    "✅ 세션에서 분리됨: {title}\n\nOpenCode 세션은 중지되지 않았습니다. 아직 실행 중이라면 별도로 계속 진행됩니다. 나중에 확인하려면 /recent에서 다시 선택하세요.",
   "detach.error": "🔴 현재 세션에서 분리하지 못했습니다.",
 
   "new.project_not_selected":
@@ -286,6 +301,8 @@ export const ko: I18nDictionary = {
     "⚠️ 이벤트 스트림은 중지되었지만 서버가 중단을 확인하지 않았습니다.\n\n/status를 확인하고 몇 초 후 /abort를 다시 시도해 주세요.",
   "stop.warn_maybe_finished": "⚠️ 이벤트 스트림이 중지되었지만 에이전트가 이미 작업을 마쳤을 수도 있습니다.",
   "stop.success": "✅ 에이전트 작업이 중단되었습니다. 이 실행의 추가 메시지는 더 이상 전송되지 않습니다.",
+  "stop.success_background_running":
+    "✅ 에이전트 동작을 중단했습니다.\n계속 실행 중인 백그라운드 작업: {count}\n진행 상황과 결과는 계속 여기에 표시됩니다.",
   "stop.warn_still_busy":
     "⚠️ 신호를 보냈지만 에이전트가 아직 작업 중입니다.\n\n이벤트 스트림이 이미 비활성화되어 중간 메시지는 전송되지 않습니다.",
   "stop.warn_timeout":
@@ -298,10 +315,11 @@ export const ko: I18nDictionary = {
   "opencode_start.already_running_external":
     "✅ OpenCode 서버가 외부 프로세스로 이미 실행 중입니다\n\n버전: {version}\n\n이 서버는 봇이 시작한 것이 아니므로 /opencode-stop으로 중지할 수 없습니다.",
   "opencode_start.already_running": "✅ OpenCode 서버가 이미 실행 중입니다\n\n버전: {version}",
+  "opencode_start.connected": "✅ 실행 중인 OpenCode 서버에 연결했습니다\n{url} · v{version}",
   "opencode_start.remote_configured": "⚠️ /opencode_start는 로컬 OpenCode 서버에서만 동작합니다.",
   "opencode_start.starting": "🔄 OpenCode 서버를 시작하는 중...",
   "opencode_start.start_error":
-    "🔴 OpenCode 서버 시작에 실패했습니다\n\n오류: {error}\n\nOpenCode CLI가 설치되어 있고 PATH에서 사용 가능한지 확인해 주세요:\nopencode --version\nnpm install -g @opencode-ai/cli",
+    "🔴 OpenCode 서버 시작에 실패했습니다\n\n오류: {error}\n\nOpenCode CLI가 설치되어 있고 PATH 또는 표준 설치 디렉터리에서 사용 가능한지 확인하세요(OPENCODE_BIN_PATH로 다른 실행 파일을 지정할 수 있습니다):\nopencode --version\nnpm install -g @opencode-ai/cli",
   "opencode_start.started_not_ready":
     "⚠️ OpenCode 서버가 시작되었지만 응답하지 않습니다\n\nPID: {pid}\n\n서버가 아직 시작 중일 수 있습니다. 몇 초 후 /status를 시도해 주세요.",
   "opencode_start.success":
@@ -320,10 +338,10 @@ export const ko: I18nDictionary = {
   "opencode_stop.success": "✅ OpenCode 서버가 성공적으로 중지되었습니다",
   "opencode_stop.error":
     "🔴 서버 중지 중 오류가 발생했습니다.\n\n자세한 내용은 애플리케이션 로그를 확인해 주세요.",
-  "reload.reloading": "🔄 Reloading OpenCode configuration...",
-  "reload.success": "✅ OpenCode configuration reloaded",
-  "reload.failed": "🔴 Failed to reload OpenCode configuration",
-  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
+  "reload.reloading": "🔄 OpenCode 설정을 다시 불러오는 중...",
+  "reload.success": "✅ OpenCode 설정을 다시 불러왔습니다",
+  "reload.failed": "🔴 OpenCode 설정을 다시 불러오지 못했습니다",
+  "reload.failed_with_error": "🔴 OpenCode 설정을 다시 불러오지 못했습니다\n\n오류: {error}",
 
   "agent.changed_message": "✅ 에이전트가 변경되었습니다: {name}",
   "agent.change_error_callback": "에이전트 변경 실패",
@@ -375,7 +393,7 @@ export const ko: I18nDictionary = {
   "context.button.close": "❌ Close",
   "context.details.title": "📊 Context details",
   "context.details.window": "Window: {used} / {limit} ({percent}%)",
-  "context.details.token_breakdown": "Token breakdown of the latest assistant message:",
+  "context.details.token_breakdown": "최근 어시스턴트 메시지의 토큰 사용 내역:",
   "context.details.input": "Input: {count}",
   "context.details.output": "Output: {count}",
   "context.details.reasoning": "Reasoning: {count}",
@@ -411,7 +429,7 @@ export const ko: I18nDictionary = {
   "permission.outcome.outside_suffix": " · answered outside Telegram",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
   "permission.outcome.not_answered": "⏹ Not answered",
-  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
+  "permission.delivery_failed": "⚠️ 응답이 OpenCode에 도달하지 않았습니다 — 다시 누르세요",
   "permission.name.bash": "Bash",
   "permission.name.edit": "편집",
   "permission.name.write": "쓰기",
@@ -456,7 +474,7 @@ export const ko: I18nDictionary = {
   "queue.media_limit": "⚠️ 대기열 미디어는 총 {maxSizeMb} MiB로 제한됩니다. 항목이 전송된 후 다시 시도하세요.",
   "queue.removed": "🗑 대기열에서 메시지를 삭제했습니다.",
   "queue.not_found": "이 메시지는 더 이상 대기열에 없습니다.",
-  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
+  "queue.steer_added": "📥 현재 작업에 추가했습니다 ({count}/{max}).",
   "queue.disabled_hint": "메시지 대기열은 /settings에서 활성화할 수 있습니다.",
   "keyboard.updated": "⌨️ 키보드가 업데이트되었습니다",
 
@@ -514,14 +532,14 @@ export const ko: I18nDictionary = {
   "runtime.wizard.ask_server_password":
     "OpenCode 서버 비밀번호를 입력하세요 (선택 사항).\nEnter를 누르면 비워 둡니다.\n> ",
   "runtime.wizard.ask_server_version":
-    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
-  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+    "OpenCode 서버 버전을 선택하세요:\n1 - OpenCode V1 (1.x, npm 패키지 opencode-ai)\n2 - OpenCode V2 (2.x, npm 패키지 @opencode/cli)\n기본값을 사용하려면 Enter를 누르세요: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "1 또는 2를 입력하거나 Enter를 눌러 기본값을 사용하세요.\n",
   "runtime.wizard.ask_server_password_required":
-    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+    "OpenCode V2 서버 비밀번호를 입력하세요 (필수).\n다음 명령으로 확인하세요: opencode service get password\n> ",
   "runtime.wizard.server_password_required":
-    "The password is required for OpenCode V2. Please try again.\n",
+    "OpenCode V2에는 비밀번호가 필수입니다. 다시 시도하세요.\n",
   "runtime.wizard.ask_server_password_keep":
-    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
+    "OpenCode 서버 비밀번호를 입력하세요.\n저장된 비밀번호를 유지하려면 Enter를 누르세요.\n> ",
   "runtime.wizard.api_url_invalid":
     "유효한 URL(http/https)을 입력하거나 Enter를 눌러 기본값을 사용하세요.\n",
   "runtime.wizard.start": "OpenCode Telegram Bot 설정을 시작합니다.\n",
@@ -577,7 +595,7 @@ export const ko: I18nDictionary = {
   "task.kind.once": "1회성",
   "task.run.success": "⏰ 예약 작업 완료: {description}",
   "task.run.error": "🔴 예약 작업 실패: {description}\n\n오류: {error}",
-  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
+  "task.run.error.folder_missing": "프로젝트 폴더가 더 이상 존재하지 않습니다: {path}",
   "task.run.error.interactive_question":
     "예약 작업이 대화형 질문을 요청하여 무인 실행을 계속할 수 없습니다.",
   "task.run.error.interactive_permission":
@@ -585,6 +603,13 @@ export const ko: I18nDictionary = {
 
   "tasklist.empty": "📭 아직 예약 작업이 없습니다.",
   "tasklist.select": "예약 작업을 선택하세요:",
+  "task.scheduling": "Scheduling",
+  "task.enabled": "On",
+  "task.disabled": "Off",
+  "task.button.enable": "Enable",
+  "task.button.disable": "Disable",
+  "task.toggle.saved": "Saved",
+  "task.toggle.error": "저장하지 못했습니다",
   "tasklist.details":
     "⏰ 예약 작업\n\n작업: {prompt}\n프로젝트: {project}\n일정: {schedule}\n{cronLine}시간대: {timezone}\n다음 실행: {nextRunAt}\n마지막 실행: {lastRunAt}\n실행 횟수: {runCount}",
   "tasklist.details.cron": "Cron: {cron}",
@@ -595,6 +620,13 @@ export const ko: I18nDictionary = {
   "tasklist.load_error": "🔴 예약 작업을 불러오지 못했습니다.",
 
   "commands.select": "OpenCode 명령어를 선택하세요:",
+  "commands.search.button": "🔍 검색",
+  "commands.search.prompt": "🔍 명령어 이름이나 설명을 입력하세요:",
+  "commands.search.results": "\"{query}\" 검색 결과:",
+  "commands.search.results_page": "\"{query}\" 검색 결과 ({page} 페이지):",
+  "commands.search.no_results": "\"{query}\"에 해당하는 명령어가 없습니다",
+  "commands.search.again": "↩ 다시 검색",
+  "commands.search.cancel": "❌ 취소",
   "commands.empty": "📭 이 프로젝트에서 사용 가능한 OpenCode 명령어가 없습니다.",
   "commands.fetch_error": "🔴 OpenCode 명령어를 불러오지 못했습니다.",
   "commands.no_description": "설명 없음",
@@ -616,12 +648,21 @@ export const ko: I18nDictionary = {
   "commands.download.downloading": "파일을 다운로드하는 중...",
   "commands.download.not_found": "파일을 찾을 수 없습니다",
   "commands.download.not_file": "경로가 파일이 아닙니다",
-  "commands.download.file_too_large": "파일이 너무 큽니다",
+  "assistant.file.unavailable": "파일을 사용할 수 없습니다: {name}",
+  "assistant.file.too_large": "파일이 {maxSizeMb} MiB 제한을 초과합니다: {name}",
+  "commands.download.file_too_large": "파일이 너무 큽니다: {size} (최대: {maxSizeMb} MiB)",
   "commands.download.size": "크기",
   "commands.download.modified": "수정됨",
   "commands.download.error": "파일 다운로드에 실패했습니다.",
 
   "skills.select": "OpenCode 스킬을 선택하세요:",
+  "skills.search.button": "🔍 검색",
+  "skills.search.prompt": "🔍 스킬 이름이나 설명을 입력하세요:",
+  "skills.search.results": "\"{query}\" 검색 결과:",
+  "skills.search.results_page": "\"{query}\" 검색 결과 ({page} 페이지):",
+  "skills.search.no_results": "\"{query}\"에 해당하는 스킬이 없습니다",
+  "skills.search.again": "↩ 다시 검색",
+  "skills.search.cancel": "❌ 취소",
   "skills.empty": "📭 이 프로젝트에서 사용 가능한 OpenCode 스킬이 없습니다.",
   "skills.fetch_error": "🔴 OpenCode 스킬을 불러오지 못했습니다.",
   "skills.no_description": "설명 없음",
@@ -716,7 +757,58 @@ export const ko: I18nDictionary = {
   "attachment.cancel": "❌ 첨부 취소",
   "attachment.cancelled": "❌ 첨부가 취소되었습니다",
   "attachment.invalid": "⚠️ 첨부한 파일을 더 이상 사용할 수 없습니다. 파일 없이 메시지를 보냅니다.",
-  "local_command.empty_output": "The command produced no output.",
-  "local_command.failed": "Command failed with exit code {exitCode}: {stderr}",
-  "local_command.timeout": "The command timed out.",
+  "local_command.empty_output": "명령이 출력을 생성하지 않았습니다.",
+  "local_command.failed": "명령이 종료 코드 {exitCode}로 실패했습니다: {stderr}",
+  "local_command.timeout": "명령 실행 시간이 초과되었습니다.",
+
+  "cmd.description.goal": "스스로 계속 진행하는 세션 목표 설정",
+  "pinned.line.goal": "◎ Goal: {status} — {objective}",
+  "goal.none": "설정된 목표가 없습니다.\n\n/goal을 사용한 다음, 다음 메시지로 목표를 보내세요.",
+  "goal.arguments_not_supported": "인수 없이 /goal을 사용한 다음 안내를 따르거나 목표 버튼을 사용하세요.",
+  "goal.input.prompt": "다음 텍스트 메시지로 이 세션의 목표를 보내세요. 달성할 결과를 설명하세요.",
+  "goal.input.empty": "목표는 비워 둘 수 없습니다. 목표 텍스트를 보내거나 Cancel을 누르세요.",
+  "goal.input.reserved": "이 단어는 OpenCode에서 목표 제어용으로 예약되어 있습니다. 목표를 더 자세히 설명하거나 Cancel을 누르세요.",
+  "goal.button.details": "◎ {status} · {objective}",
+  "goal.button.pause": "⏸ Pause",
+  "goal.button.resume": "▶ Continue",
+  "goal.button.clear": "× Delete",
+  "goal.start": "✅ Start",
+  "goal.continue": "▶ Continue",
+  "goal.delete": "🗑 Delete goal",
+  "goal.deleted": "목표를 삭제했습니다. /goal로 새 목표를 만드세요.",
+  "goal.unsupported": "이 OpenCode 서버는 세션 목표를 지원하지 않습니다.",
+  "goal.read_error": "세션 목표를 읽지 못했습니다.",
+  "goal.action_error": "세션 목표를 업데이트하지 못했습니다.",
+  "goal.too_long": "목표는 {limit}자까지 입력할 수 있습니다 (입력: {count}자).",
+  "goal.status.active": "active",
+  "goal.status.paused": "paused",
+  "goal.status.complete": "complete",
+  "goal.status.rounds": "{rounds}/{maxRounds}",
+  "goal.status.updated": "Updated {time}",
+  "goal.confirm.warning": "이 목표는 각 단계 후 스스로 계속 진행합니다. 계속 진행과 평가에는 토큰이 사용됩니다. 비용 상한은 없습니다. 라운드 한도에 도달하면 서버가 목표를 중지합니다.",
+  "goal.confirm.round_limit": "Round limit: {rounds}.",
+  "goal.confirm.start": "이 목표를 시작할까요?\n\n{objective}",
+  "goal.confirm.resume": "이 목표를 재개할까요?\n\n{objective}",
+  "goal.confirm.confirm": "Confirm",
+  "goal.confirm.cancel": "❌ Cancel",
+  "goal.notice.paused": "◎ Goal {status}\n{reason}",
+  "goal.notice.complete": "◎ Goal {status}\n{reason}",
+  "goal.notice.no_reason": "보고된 사유가 없습니다.",
+  "goal.abort.paused": "목표를 일시 중지했습니다: {reason}",
+  "goal.abort.failed": "목표를 일시 중지하지 못했습니다: {reason}",
+  "goal.reason.paused_by_user": "Paused by the user",
+  "goal.reason.stopped_by_user": "Stopped by the user",
+  "goal.reason.server_restarted": "목표가 활성 상태인 동안 서버가 재시작되었습니다",
+  "goal.reason.stopped_after_error": "오류 발생 후 목표가 중지되었습니다",
+  "goal.reason.no_verdict": "목표 검토자가 사용할 수 있는 판정을 내리지 않았습니다",
+  "goal.reason.review_too_large": "목표 검토자의 요청이 모델이 처리하기에 너무 큽니다",
+  "goal.reason.round_limit": "{rounds}라운드 한도에 도달했습니다",
+  "goal.reason.wait_limit": "목표가 백그라운드 작업을 기다리는 동안 {minutes}분간 아무것도 실행되지 않았습니다",
+  "goal.reason.not_progress": "진전이 없습니다: {reason}",
+  "goal.reason.session_failed": "세션이 실패했습니다: {reason}",
+  "goal.reason.no_active": "일시 중지할 활성 목표가 없습니다.",
+  "goal.reason.no_paused": "재개할 일시 중지된 목표가 없습니다.",
+  "goal.reason.none_set": "설정된 목표가 없습니다.",
+  "goal.reason.objective_limit": "목표 설명은 {limit}자까지 입력할 수 있습니다 (입력: {count}자).",
+
 };

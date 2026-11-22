@@ -1,4 +1,4 @@
-import type { I18nDictionary } from "./en.js";
+import { projectSearchFallback, type I18nDictionary } from "./en.js";
 
 /**
  * Indonesian localization for OpenCode Telegram Bot.
@@ -10,11 +10,23 @@ import type { I18nDictionary } from "./en.js";
 export const id: I18nDictionary = {
   "cmd.description.switch": "Cari dan beralih sesi (OpenCode / ChatGPT / Claude)",
   "cmd.description.messages_all": "Ekspor dan lihat riwayat lengkap sesi",
+  "assistant.image.unavailable": "Gambar tidak tersedia: {name}",
+  "assistant.image.unsupported": "Format gambar tidak didukung: {name}",
+  "assistant.image.too_large": "Gambar melebihi batas foto Telegram: {name}",
+  ...projectSearchFallback,
+  "projects.search.prompt": "🔍 Masukkan nama proyek:",
+  "projects.search.results": "Hasil pencarian untuk \"{query}\":",
+  "projects.search.no_results": "Tidak ada proyek yang ditemukan untuk \"{query}\"",
+  "sessions.search.prompt": "🔍 Masukkan judul atau ID sesi:",
+  "sessions.search.results": "Hasil pencarian untuk \"{query}\":",
+  "sessions.search.results_page": "Hasil pencarian untuk \"{query}\" (halaman {page}):",
+  "sessions.search.no_results": "Tidak ada sesi yang ditemukan untuk \"{query}\"",
   "cmd.description.recent": "Sesi terbaru di semua proyek",
   "recent.heading": "Sesi terbaru di semua proyek (segarkan dengan /recent):",
   "recent.empty": "📭 Tidak ada sesi di semua proyek.",
   "recent.running": "berjalan",
   "recent.idle": "diam",
+  "recent.status.unread": "balasan belum dibaca",
   "recent.question": "menunggu jawaban",
   "recent.permission": "menunggu izin",
   "cmd.description.status": "Status server dan sesi",
@@ -33,7 +45,7 @@ export const id: I18nDictionary = {
   "cmd.description.mcps": "Server MCP",
   "cmd.description.opencode_start": "Mulai server OpenCode",
   "cmd.description.opencode_stop": "Hentikan server OpenCode",
-  "cmd.description.reload": "Reload OpenCode configuration",
+  "cmd.description.reload": "Muat ulang konfigurasi OpenCode",
   "cmd.description.ls": "Daftar isi direktori",
   "cmd.description.help": "Bantuan",
 
@@ -82,14 +94,17 @@ export const id: I18nDictionary = {
   "bot.thinking": "💭 Berpikir...",
   "progress.compact.activity": "{header}\n{activity}",
   "progress.compact.working_header": "⏳ Bekerja",
-  "progress.compact.finished_header": "✅ Pekerjaan Selesai",
   "progress.compact.thinking": "💭 Berpikir...",
   "progress.compact.responding": "✍️ Menulis jawaban...",
   "progress.compact.waiting_question": "❓ Menunggu jawabanmu...",
   "progress.compact.waiting_permission": "🔐 Menunggu izin...",
   "progress.compact.retrying": "🔁 Mencoba lagi...",
   "progress.compact.task": "🤖 Menjalankan Tugas",
-  "progress.compact.done": "{header}\npanggilan tool: {tools} · file diubah: {files}",
+  "progress.compact.count.commands": "perintah: {count}",
+  "progress.compact.count.edits": "suntingan: {count}",
+  "progress.compact.count.reads": "pembacaan: {count}",
+  "progress.compact.count.tools": "tool: {count}",
+  "progress.compact.count.changed_files": "file diubah: {count}",
   "bot.project_not_selected": "🏗 Proyek belum dipilih.\n\nPilih dulu proyek dengan /projects.",
   "bot.creating_session": "🔄 Membuat sesi baru...",
   "bot.create_session_error":
@@ -101,9 +116,9 @@ export const id: I18nDictionary = {
     "⚠️ Sesi aktif tidak cocok dengan proyek yang dipilih, jadi sesi direset. Gunakan /sessions untuk memilih atau /new untuk membuat sesi baru.",
   "bot.prompt_send_error": "Gagal mengirim prompt ke OpenCode.",
   "bot.project_folder_missing":
-    "🚫 The project folder no longer exists: {path}. Choose another project in /projects.",
+    "🚫 Folder proyek sudah tidak ada: {path}. Pilih proyek lain di /projects.",
   "bot.project_folder_missing_worktree":
-    "🚫 The project folder no longer exists: {path}. Choose another worktree in /worktree.",
+    "🚫 Folder proyek sudah tidak ada: {path}. Pilih worktree lain di /worktree.",
   "bot.session_error": "🔴 OpenCode mengembalikan kesalahan: {message}",
   "bot.assistant_reply_undelivered":
     "⚠️ Balasan terakhir dari asisten tidak berhasil dikirim. Kirim ulang pesanmu jika masih membutuhkannya.",
@@ -113,7 +128,7 @@ export const id: I18nDictionary = {
     "🔁 {message}\n\nProvider terus mengembalikan kesalahan yang sama meski diulang berkali-kali. Gunakan /abort untuk menghentikan.",
   "bot.external_user_input": "Input pengguna eksternal",
   "background.session_fallback": "sesi {id}",
-  "background.assistant_response": "🔔 Asisten membalas di sesi latar belakang: {session}",
+  "background.assistant_response": "🔔 Balasan dari sesi lain:\n[{project}] {session}",
   "background.question_asked": "❓ Sesi latar belakang membutuhkan jawaban: {session}",
   "background.permission_asked": "🔐 Sesi latar belakang meminta izin: {session}",
   "background.open_session_button": "Buka sesi",
@@ -129,15 +144,13 @@ export const id: I18nDictionary = {
   "bot.files_downloading": "⏳ Mengunduh file...",
   "bot.file_too_large": "⚠️ File terlalu besar (maks {maxSizeMb}MB)",
   "bot.file_download_error": "🔴 Gagal mengunduh file",
-  "bot.file_type_unsupported":
-    "⚠️ Jenis file ini tidak didukung. Kirim gambar, dokumen (PDF, DOCX, PPTX), atau file teks/kode.",
+  "bot.file_save_error": "🔴 Gagal menyimpan file secara lokal, agen tidak dapat membacanya.",
   "bot.rich_message_media_skipped": "⚠️ Melewati {count} bagian media yang tidak didukung.",
   "bot.message_type_unsupported": "⚠️ Jenis pesan ini tidak didukung.",
   "bot.media_group_not_processed":
     "⚠️ Ada file di album ini yang tidak bisa diproses. Tidak ada yang dikirim ke OpenCode.",
   "bot.media_group_download_error":
     "🔴 Gagal mengunduh salah satu file. Tidak ada yang dikirim ke OpenCode.",
-  "bot.model_no_pdf": "⚠️ Model saat ini tidak mendukung input PDF. Mengirim teks saja.",
   "bot.document_extraction_error": "🔴 Gagal mengekstrak teks dokumen.",
   "bot.text_file_too_large": "⚠️ File teks terlalu besar (maks {maxSizeKb}KB)",
 
@@ -184,7 +197,9 @@ export const id: I18nDictionary = {
   "settings.response_streaming.draft": "draf (eksperimental)",
   "settings.diff_files.label": "File diff",
   "settings.assistant_footer.label": "Tampilkan footer asisten",
+  "assistant.footer.interrupted": "interrupted",
   "settings.pin_session_dashboard.label": "Sematkan dasbor sesi",
+  "settings.background_notifications.label": "Notifikasi dari sesi lain",
   "settings.tts.label": "Balasan audio",
   "settings.prompt_queue.label": "Antrean pesan",
   "settings.value.on": "Aktif",
@@ -261,7 +276,7 @@ export const id: I18nDictionary = {
   "detach.project_not_selected": "🏗 Proyek belum dipilih.\n\nPilih dulu proyek dengan /projects.",
   "detach.no_active_session": "ℹ️ Bot sudah terlepas dari sesi mana pun.",
   "detach.success":
-    "✅ Terlepas dari sesi: {title}\n\nSesi OpenCode tidak dihentikan. Jika masih berjalan, sesi akan lanjut sendiri. Untuk memeriksanya nanti, pilih lagi lewat /sessions.",
+    "✅ Terlepas dari sesi: {title}\n\nSesi OpenCode tidak dihentikan. Jika masih berjalan, sesi akan lanjut sendiri. Untuk memeriksanya nanti, pilih lagi lewat /recent.",
   "detach.error": "🔴 Gagal melepaskan dari sesi saat ini.",
 
   "new.project_not_selected": "🏗 Proyek belum dipilih.\n\nPilih dulu proyek dengan /projects.",
@@ -277,6 +292,8 @@ export const id: I18nDictionary = {
   "stop.warn_maybe_finished": "⚠️ Stream event dihentikan, tetapi agent mungkin sudah selesai.",
   "stop.success":
     "✅ Aksi agent dihentikan. Tidak ada lagi pesan dari tugas ini yang akan dikirim.",
+  "stop.success_background_running":
+    "✅ Tindakan agen dihentikan.\nOperasi latar belakang tetap berjalan: {count}\nProgres dan hasilnya akan tetap muncul di sini.",
   "stop.warn_still_busy":
     "⚠️ Sinyal terkirim, tetapi agent masih sibuk.\n\nStream event sudah dinonaktifkan, jadi tidak ada pesan perantara yang akan dikirim.",
   "stop.warn_timeout":
@@ -290,11 +307,13 @@ export const id: I18nDictionary = {
   "opencode_start.already_running_external":
     "✅ Server OpenCode sudah berjalan sebagai proses eksternal\n\nVersi: {version}\n\nServer ini tidak dimulai oleh bot, jadi /opencode-stop tidak bisa menghentikannya.",
   "opencode_start.already_running": "✅ Server OpenCode sudah berjalan\n\nVersi: {version}",
+  "opencode_start.connected":
+    "✅ Terhubung ke Server OpenCode yang sedang berjalan\n{url} · v{version}",
   "opencode_start.remote_configured":
     "⚠️ /opencode_start hanya berfungsi dengan Server OpenCode lokal.",
   "opencode_start.starting": "🔄 Memulai Server OpenCode...",
   "opencode_start.start_error":
-    "🔴 Gagal memulai Server OpenCode\n\nKesalahan: {error}\n\nPastikan OpenCode CLI terinstal dan tersedia di PATH:\nopencode --version\nnpm install -g @opencode-ai/cli",
+    "🔴 Gagal memulai Server OpenCode\n\nKesalahan: {error}\n\nPastikan OpenCode CLI terinstal dan tersedia di PATH atau direktori instalasi standar (OPENCODE_BIN_PATH dapat menunjuk ke executable lain):\nopencode --version\nnpm install -g @opencode-ai/cli",
   "opencode_start.started_not_ready":
     "⚠️ Server OpenCode dimulai, tetapi tidak merespons\n\nPID: {pid}\n\nServer mungkin masih dalam proses memulai. Coba /status beberapa detik lagi.",
   "opencode_start.success": "✅ Server OpenCode berhasil dimulai\n\nPID: {pid}\nVersi: {version}",
@@ -311,10 +330,10 @@ export const id: I18nDictionary = {
   "opencode_stop.still_running": "Server masih merespons meski sudah diminta berhenti.",
   "opencode_stop.success": "✅ Server OpenCode berhasil dihentikan",
   "opencode_stop.error": "🔴 Gagal menghentikan server.\n\nPeriksa log aplikasi untuk detailnya.",
-  "reload.reloading": "🔄 Reloading OpenCode configuration...",
-  "reload.success": "✅ OpenCode configuration reloaded",
-  "reload.failed": "🔴 Failed to reload OpenCode configuration",
-  "reload.failed_with_error": "🔴 Failed to reload OpenCode configuration\n\nError: {error}",
+  "reload.reloading": "🔄 Memuat ulang konfigurasi OpenCode...",
+  "reload.success": "✅ Konfigurasi OpenCode dimuat ulang",
+  "reload.failed": "🔴 Gagal memuat ulang konfigurasi OpenCode",
+  "reload.failed_with_error": "🔴 Gagal memuat ulang konfigurasi OpenCode\n\nKesalahan: {error}",
 
   "agent.changed_message": "✅ Agent diubah menjadi: {name}",
   "agent.change_error_callback": "Gagal mengubah agent",
@@ -365,7 +384,7 @@ export const id: I18nDictionary = {
   "context.button.close": "❌ Close",
   "context.details.title": "📊 Context details",
   "context.details.window": "Window: {used} / {limit} ({percent}%)",
-  "context.details.token_breakdown": "Token breakdown of the latest assistant message:",
+  "context.details.token_breakdown": "Rincian token pesan terakhir asisten:",
   "context.details.input": "Input: {count}",
   "context.details.output": "Output: {count}",
   "context.details.reasoning": "Reasoning: {count}",
@@ -401,7 +420,7 @@ export const id: I18nDictionary = {
   "permission.outcome.outside_suffix": " · answered outside Telegram",
   "permission.outcome.settled_outside": "☑️ Answered outside Telegram",
   "permission.outcome.not_answered": "⏹ Not answered",
-  "permission.delivery_failed": "⚠️ The answer did not reach OpenCode — tap again",
+  "permission.delivery_failed": "⚠️ Jawaban tidak sampai ke OpenCode — ketuk lagi",
   "permission.name.bash": "Bash",
   "permission.name.edit": "Edit",
   "permission.name.write": "Tulis",
@@ -448,7 +467,7 @@ export const id: I18nDictionary = {
     "⚠️ Media dalam antrean dibatasi {maxSizeMb} MiB. Tunggu hingga satu item terkirim, lalu coba lagi.",
   "queue.removed": "🗑 Pesan dihapus dari antrean.",
   "queue.not_found": "Pesan ini sudah tidak ada di antrean.",
-  "queue.steer_added": "📥 Added to the current task ({count}/{max}).",
+  "queue.steer_added": "📥 Ditambahkan ke tugas saat ini ({count}/{max}).",
   "queue.disabled_hint": "Aktifkan antrean pesan di /settings.",
   "keyboard.updated": "⌨️ Keyboard diperbarui",
 
@@ -506,14 +525,14 @@ export const id: I18nDictionary = {
   "runtime.wizard.ask_server_password":
     "Masukkan kata sandi server OpenCode (opsional).\nTekan Enter untuk membiarkannya kosong.\n> ",
   "runtime.wizard.ask_server_version":
-    "Select OpenCode server version:\n1 - OpenCode V1 (1.x, npm package opencode-ai)\n2 - OpenCode V2 (2.x, npm package @opencode/cli)\nPress Enter to use default: {defaultVersion}\n> ",
-  "runtime.wizard.server_version_invalid": "Enter 1 or 2, or press Enter for default.\n",
+    "Pilih versi server OpenCode:\n1 - OpenCode V1 (1.x, paket npm opencode-ai)\n2 - OpenCode V2 (2.x, paket npm @opencode/cli)\nTekan Enter untuk menggunakan nilai default: {defaultVersion}\n> ",
+  "runtime.wizard.server_version_invalid": "Masukkan 1 atau 2, atau tekan Enter untuk nilai default.\n",
   "runtime.wizard.ask_server_password_required":
-    "Enter OpenCode V2 server password (required).\nShow it with: opencode service get password\n> ",
+    "Masukkan kata sandi server OpenCode V2 (wajib).\nTampilkan dengan: opencode service get password\n> ",
   "runtime.wizard.server_password_required":
-    "The password is required for OpenCode V2. Please try again.\n",
+    "Kata sandi wajib diisi untuk OpenCode V2. Silakan coba lagi.\n",
   "runtime.wizard.ask_server_password_keep":
-    "Enter OpenCode server password.\nPress Enter to keep the saved password.\n> ",
+    "Masukkan kata sandi server OpenCode.\nTekan Enter untuk mempertahankan kata sandi yang tersimpan.\n> ",
   "runtime.wizard.api_url_invalid":
     "Masukkan URL yang valid (http/https) atau tekan Enter untuk default.\n",
   "runtime.wizard.start": "Menyiapkan OpenCode Telegram Bot.\n",
@@ -567,7 +586,7 @@ export const id: I18nDictionary = {
   "task.kind.once": "sekali",
   "task.run.success": "⏰ Tugas terjadwal selesai: {description}",
   "task.run.error": "🔴 Tugas terjadwal gagal: {description}\n\nKesalahan: {error}",
-  "task.run.error.folder_missing": "The project folder no longer exists: {path}",
+  "task.run.error.folder_missing": "Folder proyek sudah tidak ada: {path}",
   "task.run.error.interactive_question":
     "Tugas terjadwal meminta pertanyaan interaktif, jadi tidak bisa lanjut tanpa pengawasan.",
   "task.run.error.interactive_permission":
@@ -575,6 +594,13 @@ export const id: I18nDictionary = {
 
   "tasklist.empty": "📭 Belum ada tugas terjadwal.",
   "tasklist.select": "Pilih tugas terjadwal:",
+  "task.scheduling": "Scheduling",
+  "task.enabled": "On",
+  "task.disabled": "Off",
+  "task.button.enable": "Enable",
+  "task.button.disable": "Disable",
+  "task.toggle.saved": "Saved",
+  "task.toggle.error": "Gagal menyimpan",
   "tasklist.details":
     "⏰ Tugas terjadwal\n\nTugas: {prompt}\nProyek: {project}\nJadwal: {schedule}\n{cronLine}Zona waktu: {timezone}\nDijalankan berikutnya: {nextRunAt}\nTerakhir dijalankan: {lastRunAt}\nSudah dijalankan: {runCount} kali",
   "tasklist.details.cron": "Cron: {cron}",
@@ -585,6 +611,13 @@ export const id: I18nDictionary = {
   "tasklist.load_error": "🔴 Gagal memuat tugas terjadwal.",
 
   "commands.select": "Pilih perintah OpenCode:",
+  "commands.search.button": "🔍 Cari",
+  "commands.search.prompt": "🔍 Masukkan nama atau deskripsi perintah:",
+  "commands.search.results": "Hasil pencarian untuk \"{query}\":",
+  "commands.search.results_page": "Hasil pencarian untuk \"{query}\" (halaman {page}):",
+  "commands.search.no_results": "Tidak ada perintah yang ditemukan untuk \"{query}\"",
+  "commands.search.again": "↩ Cari lagi",
+  "commands.search.cancel": "❌ Batal",
   "commands.empty": "📭 Tidak ada perintah OpenCode yang tersedia untuk proyek ini.",
   "commands.fetch_error": "🔴 Gagal memuat perintah OpenCode.",
   "commands.no_description": "Tanpa deskripsi",
@@ -606,12 +639,21 @@ export const id: I18nDictionary = {
   "commands.download.downloading": "Mengunduh file...",
   "commands.download.not_found": "File tidak ditemukan",
   "commands.download.not_file": "Path ini bukan file",
-  "commands.download.file_too_large": "File terlalu besar",
+  "assistant.file.unavailable": "File tidak tersedia: {name}",
+  "assistant.file.too_large": "File melebihi batas {maxSizeMb} MiB: {name}",
+  "commands.download.file_too_large": "File terlalu besar: {size} (maksimum: {maxSizeMb} MiB)",
   "commands.download.size": "Ukuran",
   "commands.download.modified": "Diubah",
   "commands.download.error": "Gagal mengunduh file.",
 
   "skills.select": "Pilih skill OpenCode:",
+  "skills.search.button": "🔍 Cari",
+  "skills.search.prompt": "🔍 Masukkan nama atau deskripsi skill:",
+  "skills.search.results": "Hasil pencarian untuk \"{query}\":",
+  "skills.search.results_page": "Hasil pencarian untuk \"{query}\" (halaman {page}):",
+  "skills.search.no_results": "Tidak ada skill yang ditemukan untuk \"{query}\"",
+  "skills.search.again": "↩ Cari lagi",
+  "skills.search.cancel": "❌ Batal",
   "skills.empty": "📭 Tidak ada skill OpenCode yang tersedia untuk proyek ini.",
   "skills.fetch_error": "🔴 Gagal memuat skill OpenCode.",
   "skills.no_description": "Tanpa deskripsi",
@@ -711,4 +753,55 @@ export const id: I18nDictionary = {
   "local_command.empty_output": "Perintah tidak menghasilkan output.",
   "local_command.failed": "Perintah gagal dengan exit code {exitCode}: {stderr}",
   "local_command.timeout": "Perintah kehabisan waktu.",
+
+  "cmd.description.goal": "Tetapkan tujuan sesi yang berlanjut secara mandiri",
+  "pinned.line.goal": "◎ Goal: {status} — {objective}",
+  "goal.none": "Belum ada tujuan yang ditetapkan.\n\nGunakan /goal, lalu kirim tujuan dalam pesan berikutnya.",
+  "goal.arguments_not_supported": "Gunakan /goal tanpa argumen, lalu ikuti petunjuk atau gunakan tombol tujuan.",
+  "goal.input.prompt": "Kirim tujuan sesi ini dalam pesan teks berikutnya. Jelaskan hasil yang ingin dicapai.",
+  "goal.input.empty": "Tujuan tidak boleh kosong. Kirim teksnya atau ketuk Cancel.",
+  "goal.input.reserved": "Kata itu dicadangkan oleh OpenCode untuk kontrol tujuan. Jelaskan tujuan dengan lebih terperinci, atau ketuk Cancel.",
+  "goal.button.details": "◎ {status} · {objective}",
+  "goal.button.pause": "⏸ Pause",
+  "goal.button.resume": "▶ Continue",
+  "goal.button.clear": "× Delete",
+  "goal.start": "✅ Start",
+  "goal.continue": "▶ Continue",
+  "goal.delete": "🗑 Delete goal",
+  "goal.deleted": "Tujuan dihapus. Gunakan /goal untuk membuat tujuan baru.",
+  "goal.unsupported": "Server OpenCode ini tidak mendukung tujuan sesi.",
+  "goal.read_error": "Gagal membaca tujuan sesi.",
+  "goal.action_error": "Gagal memperbarui tujuan sesi.",
+  "goal.too_long": "Tujuan dibatasi hingga {limit} karakter (diterima {count}).",
+  "goal.status.active": "active",
+  "goal.status.paused": "paused",
+  "goal.status.complete": "complete",
+  "goal.status.rounds": "{rounds}/{maxRounds}",
+  "goal.status.updated": "Updated {time}",
+  "goal.confirm.warning": "Tujuan ini berlanjut secara mandiri setelah setiap langkah. Kelanjutan dan evaluasi menghabiskan token. Tidak ada batas biaya. Server menghentikannya setelah mencapai batas putaran.",
+  "goal.confirm.round_limit": "Round limit: {rounds}.",
+  "goal.confirm.start": "Mulai tujuan ini?\n\n{objective}",
+  "goal.confirm.resume": "Lanjutkan tujuan ini?\n\n{objective}",
+  "goal.confirm.confirm": "Confirm",
+  "goal.confirm.cancel": "❌ Cancel",
+  "goal.notice.paused": "◎ Goal {status}\n{reason}",
+  "goal.notice.complete": "◎ Goal {status}\n{reason}",
+  "goal.notice.no_reason": "Tidak ada alasan yang dilaporkan.",
+  "goal.abort.paused": "Tujuan dijeda: {reason}",
+  "goal.abort.failed": "Gagal menjeda tujuan: {reason}",
+  "goal.reason.paused_by_user": "Paused by the user",
+  "goal.reason.stopped_by_user": "Stopped by the user",
+  "goal.reason.server_restarted": "Server dimulai ulang saat tujuan masih aktif",
+  "goal.reason.stopped_after_error": "Tujuan berhenti setelah terjadi kesalahan",
+  "goal.reason.no_verdict": "Peninjau tujuan tidak memberikan keputusan yang dapat digunakan",
+  "goal.reason.review_too_large": "Permintaan peninjau tujuan terlalu besar untuk model",
+  "goal.reason.round_limit": "Batas {rounds} putaran tercapai",
+  "goal.reason.wait_limit": "Tidak ada yang berjalan selama {minutes} menit saat tujuan menunggu pekerjaan latar belakang",
+  "goal.reason.not_progress": "Tidak ada kemajuan: {reason}",
+  "goal.reason.session_failed": "Sesi gagal: {reason}",
+  "goal.reason.no_active": "Tidak ada tujuan aktif untuk dijeda.",
+  "goal.reason.no_paused": "Tidak ada tujuan yang dijeda untuk dilanjutkan.",
+  "goal.reason.none_set": "Belum ada tujuan yang ditetapkan.",
+  "goal.reason.objective_limit": "Teks tujuan dibatasi hingga {limit} karakter (diterima {count}).",
+
 };
